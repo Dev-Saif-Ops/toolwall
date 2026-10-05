@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.2] - 2026-10-05
 
 Findings from a three-lens red-team (bypass hunting, claims and mutation
 testing, a first-time user wiring a live local agent). Every fix below has a

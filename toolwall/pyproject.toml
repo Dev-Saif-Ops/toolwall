@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "toolwall"
-version = "0.4.1"
+version = "0.4.2"
 description = "Security gateway for AI agent tool calls: fail-closed schema + policy + secret-detection gate before any tool executes"
 readme = "README.md"
 license = { text = "MIT" }
