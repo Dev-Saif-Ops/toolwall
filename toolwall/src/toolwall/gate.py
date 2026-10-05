@@ -364,7 +364,16 @@ class Gate:
 
     # -- execution ----------------------------------------------------------------
 
-    def execute(self, result: GateResult) -> GateResult:
+    def execute(
+        self, result: GateResult, invoke: Callable[[dict[str, Any]], Any] | None = None
+    ) -> GateResult:
+        """Run an ALLOW result: receipt check, budget, dry-run, tool, output scan.
+
+        invoke: optional callable that receives the verified arguments instead of
+        the registered tool being called with them (MCPGuard forwards to a
+        downstream server this way). Everything else applies unchanged; the tool
+        must still be registered, because registration is the allowlist.
+        """
         if not result.allowed or result.call is None:
             joined = "; ".join(result.reasons) or "no call"
             raise PermissionError(f"refusing to execute a {result.verdict.value} result: {joined}")
@@ -438,7 +447,10 @@ class Gate:
             result.error = f"unknown tool at execute time: {result.call.name!r}"
         else:
             try:
-                result.return_value = tool(**execute_args)
+                if invoke is not None:
+                    result.return_value = invoke(execute_args)
+                else:
+                    result.return_value = tool(**execute_args)
                 result.executed = True
             except Exception as exc:
                 result.error = self._scan_error_text(f"{type(exc).__name__}: {exc}", type(exc).__name__)
@@ -459,6 +471,7 @@ class Gate:
                     ok=result.executed,
                     namespace=self._scrub(result.call.name),
                     error=self._scrub(result.error),
+                    meta={"forwarded": True} if invoke is not None else {},
                 )
             )
         return result

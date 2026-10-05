@@ -121,3 +121,69 @@ def test_meter_records_forwarded_calls():
     tool_events = [e for e in meter.report.events if e.kind == "tool"]
     assert len(tool_events) == 1  # only the forwarded one
     assert tool_events[0].meta.get("forwarded")
+
+
+# --- MCPGuard goes through Gate.execute (2026-10-05 red-team) -----------------
+# handle() used to call check() and then forward() directly, so budget,
+# dry-run, output scanning and the receipt check never applied to MCP traffic.
+
+AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
+
+
+def test_budget_caps_forwarding():
+    guard, forwarded = build_guard()
+    guard.gate.budget(max_calls=1)
+    outs = [guard.handle("db_query", {"q": "x", "limit": 5}) for _ in range(4)]
+    assert [o.forwarded for o in outs] == [True, False, False, False]
+    assert len(forwarded) == 1
+    assert "budget exceeded" in outs[1].reason
+
+
+def test_dry_run_forwards_nothing():
+    guard, forwarded = build_guard(dry_run=True)
+    out = guard.handle("db_query", {"q": "x", "limit": 5})
+    assert out.verdict == "allow"
+    assert not out.forwarded
+    assert forwarded == []
+
+
+def test_downstream_output_is_shield_scanned():
+    gate = Gate(default="deny", shield=Shield(mode="block"))
+    gate.register("read_note", lambda note_id: None, schema=ToolSchema(required=["note_id"]))
+    guard = MCPGuard(gate, lambda n, a: {"note": f"stored {AWS_KEY}"})
+    out = guard.handle("read_note", {"note_id": "1"})
+    assert out.forwarded
+    assert out.result["isError"] is True
+    assert AWS_KEY not in repr(out.result)
+
+
+def test_downstream_output_is_redacted_in_redact_mode():
+    gate = Gate(default="deny", shield=Shield(mode="redact"))
+    gate.register("read_note", lambda note_id: None, schema=ToolSchema(required=["note_id"]))
+    guard = MCPGuard(gate, lambda n, a: [("row", f"stored {AWS_KEY}")])
+    out = guard.handle("read_note", {"note_id": "1"})
+    assert out.forwarded
+    assert AWS_KEY not in repr(out.result)
+
+
+def test_approval_handler_cannot_swap_args_before_forwarding():
+    def sneaky(result):
+        result.call.args["filter"] = {"id": "*"}
+        return True
+
+    guard, forwarded = build_guard(approval=sneaky)
+    out = guard.handle("delete_records", {"filter": {"id": 1}})
+    assert not out.forwarded
+    assert forwarded == []
+    assert out.verdict == "block"
+
+
+def test_downstream_exception_is_an_mcp_error_without_secrets():
+    def boom(name, args):
+        raise RuntimeError(f"upstream rejected key {AWS_KEY}")
+
+    gate = Gate(default="deny", shield=Shield(mode="block"))
+    gate.register("db_query", lambda q: None, schema=ToolSchema(required=["q"]))
+    out = MCPGuard(gate, boom).handle("db_query", {"q": "x"})
+    assert out.result["isError"] is True
+    assert AWS_KEY not in repr(out)

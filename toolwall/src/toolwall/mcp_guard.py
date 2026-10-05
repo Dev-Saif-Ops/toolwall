@@ -61,24 +61,44 @@ class MCPGuard:
             result = self.gate._resolve_approval(result)
 
         if not result.allowed:
+            return _refused(result)
+
+        # Forward through Gate.execute, not around it: the receipt check, budget,
+        # dry-run and output scanning apply to MCP traffic exactly as to local tools.
+        # The shield may have rewritten args (redact mode); execute hands over the
+        # verified copy.
+        reached: list[bool] = []
+
+        def invoke(verified_args: dict[str, Any]) -> Any:
+            reached.append(True)
+            return self.forward(name, verified_args)
+
+        result = self.gate.execute(result, invoke=invoke)
+
+        if not result.allowed:  # refused at execute time (receipt mismatch, budget)
+            return _refused(result)
+        if result.dry_run:
+            return GuardedCall(verdict="allow", forwarded=False, reason="dry run: not forwarded")
+        if result.error is not None:  # downstream raised, or its output was withheld
             return GuardedCall(
-                verdict=result.verdict.value,
-                forwarded=False,
-                reason="; ".join(result.reasons) or None,
-                result=to_mcp_error(result),
+                verdict="allow",
+                forwarded=bool(reached),
+                reason=result.error,
+                result={
+                    "isError": True,
+                    "content": [{"type": "text", "text": f"toolwall: {result.error}"}],
+                },
             )
+        return GuardedCall(verdict="allow", forwarded=True, result=result.return_value)
 
-        # Shield may have rewritten args (redact mode); forward the clean copy.
-        clean_args = result.call.args if result.call else args
-        downstream = self.forward(name, clean_args)
-        if self.gate.meter is not None:
-            from toolwall.meter import RunEvent
 
-            self.gate.meter.record(
-                RunEvent(lane=self.gate.lane, kind="tool", ok=True, namespace=name,
-                         meta={"forwarded": True})
-            )
-        return GuardedCall(verdict="allow", forwarded=True, result=downstream)
+def _refused(result: GateResult) -> GuardedCall:
+    return GuardedCall(
+        verdict=result.verdict.value,
+        forwarded=False,
+        reason="; ".join(result.reasons) or None,
+        result=to_mcp_error(result),
+    )
 
 
 def build_stdio_guard(gate: Gate, upstream_command: list[str]):  # pragma: no cover
