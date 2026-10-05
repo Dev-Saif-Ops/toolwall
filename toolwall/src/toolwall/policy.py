@@ -6,6 +6,7 @@ Rules are plain callables returning truthy/falsy. A raising rule fails closed.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,7 +23,15 @@ def _named(name: str, fn: Rule) -> Rule:
 
 def in_range(lo: float | None = None, hi: float | None = None) -> Rule:
     def rule(value: Any) -> bool:
+        # bool is an int subclass: True would read as 1. Not a quantity.
+        if isinstance(value, bool):
+            return False
         number = float(value)
+        # NaN compares False against everything, so both bound checks below would
+        # pass it. Infinity is outside any finite range anyway; reject it here too
+        # so a one-sided range (hi=None) cannot admit it.
+        if not math.isfinite(number):
+            return False
         if lo is not None and number < lo:
             return False
         if hi is not None and number > hi:

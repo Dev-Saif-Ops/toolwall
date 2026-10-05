@@ -49,13 +49,19 @@ def _as_data(obj: Any) -> Any:
     raise IntakeError(f"unsupported payload type: {type(obj).__name__}")
 
 
+def _reject_constant(name: str) -> Any:
+    # Python's json accepts NaN/Infinity, which are not JSON. A model emitting
+    # them is either broken or probing range checks; neither should reach a tool.
+    raise ValueError(f"non-standard JSON constant {name!r}")
+
+
 def _parse_args(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
     if isinstance(value, str):
         try:
-            value = json.loads(value or "{}")
-        except json.JSONDecodeError as exc:
+            value = json.loads(value or "{}", parse_constant=_reject_constant)
+        except (ValueError, RecursionError) as exc:  # JSONDecodeError is a ValueError
             raise IntakeError(f"tool arguments are not valid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise IntakeError(f"tool args must be an object, got {type(value).__name__}")

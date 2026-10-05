@@ -75,3 +75,26 @@ def test_empty_filter_delete_blocked():
     result = gate.run({"name": "delete_records", "args": {"filter": {}}})
     assert result.verdict is Verdict.BLOCK
     assert not result.executed
+
+
+def test_in_range_rejects_non_finite_and_bool():
+    rule = in_range(0, 1000)
+    for bad in (float("nan"), "nan", "NaN", float("inf"), "-inf", True, False):
+        assert not rule(bad), f"in_range accepted {bad!r}"
+    for good in (0, 5, 5.5, "7", 1000):
+        assert rule(good), f"in_range rejected {good!r}"
+
+
+def test_openai_json_nan_and_infinity_are_rejected_at_intake():
+    gate = Gate(default="deny")
+    ran = []
+    gate.register("transfer", lambda amount: ran.append(amount),
+                  schema=ToolSchema(required=["amount"], types={"amount": (int, float)}),
+                  policy=Policy(constraints={"amount": in_range(0, 1000)}))
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        payload = {"choices": [{"message": {"tool_calls": [{"id": "1", "function": {
+            "name": "transfer", "arguments": '{"amount": %s}' % literal}}]}}]}
+        result = gate.run(payload)
+        assert result.verdict is Verdict.BLOCK, literal
+        assert "intake" in result.reason
+    assert ran == []

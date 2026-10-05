@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import random
 import string
+from decimal import Decimal
 
 import pytest
 
@@ -206,9 +207,18 @@ def test_dry_run_never_executes_anything():
 
 
 def test_nan_and_inf_do_not_slip_past_range_policy():
-    """NaN comparisons are always False; make sure that can't read as 'in range'."""
+    """NaN comparisons are always False; make sure that can't read as 'in range'.
+
+    The argument is deliberately untyped. An earlier version of this test used
+    db_query, whose schema types limit as int, so the schema rejected the float
+    before in_range ever saw it and the test passed with in_range broken.
+    """
     CALLS.clear()
-    gate = build_gate("warn")
-    for bad in (float("nan"), float("inf"), float("-inf")):
-        result = gate.run({"name": "db_query", "args": {"q": "x", "limit": bad}})
-        assert not result.executed, f"limit={bad} executed"
+    gate = Gate(default="deny", shield=Shield(mode="warn"))
+    gate.register("transfer", counted("transfer"),
+                  schema=ToolSchema(required=["amount"]),
+                  policy=Policy(constraints={"amount": in_range(0, 1000)}))
+    for bad in (float("nan"), float("inf"), float("-inf"), "nan", "NaN", "inf", Decimal("NaN")):
+        result = gate.run({"name": "transfer", "args": {"amount": bad}})
+        assert not result.executed, f"amount={bad!r} executed"
+    assert CALLS == {}
