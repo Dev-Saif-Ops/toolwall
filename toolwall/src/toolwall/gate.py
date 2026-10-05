@@ -274,6 +274,16 @@ class Gate:
         return results[0]
 
     def _check_one(self, call: ToolCall) -> GateResult:
+        # Anything that raises while deciding is a BLOCK, not an exception for the
+        # caller's error handling to interpret (deep nesting, hostile objects).
+        try:
+            return self._check_one_unguarded(call)
+        except Exception as exc:
+            return self._record(
+                GateResult(Verdict.BLOCK, call, [f"gate could not check the call ({type(exc).__name__}): fails closed"])
+            )
+
+    def _check_one_unguarded(self, call: ToolCall) -> GateResult:
         # Take our own copy before anything is validated. The caller still holds a
         # reference to the dict it handed in, and without this it could edit the
         # arguments after the verdict and before execution.
@@ -430,9 +440,17 @@ class Gate:
             try:
                 result.return_value = tool(**execute_args)
                 result.executed = True
-                self._scan_output(result)
             except Exception as exc:
-                result.error = f"{type(exc).__name__}: {exc}"
+                result.error = self._scan_error_text(f"{type(exc).__name__}: {exc}", type(exc).__name__)
+            else:
+                try:
+                    self._scan_output(result)
+                except Exception as exc:
+                    # Output we could not scan is output we cannot vouch for.
+                    result.return_value = None
+                    result.error = (
+                        f"tool output withheld: output could not be scanned ({type(exc).__name__})"
+                    )
         if self.meter is not None:
             self.meter.record(
                 RunEvent(
@@ -474,6 +492,21 @@ class Gate:
         for f in findings:
             f.arg = f"return.{f.arg}" if f.arg else "return"
         result.findings.extend(findings)
+
+    def _scan_error_text(self, message: str, exc_name: str) -> str:
+        """A tool's exception text goes back to the model and into the audit log."""
+        if self.shield is None or self.shield.mode == "warn":
+            return message
+        try:
+            if self.shield.mode == "redact":
+                cleaned, _ = self.shield.redact_text(message)
+                return cleaned
+            findings = self.shield.scan(message)
+        except Exception:
+            return f"{exc_name}: [message withheld: could not be scanned]"
+        if findings:
+            return f"{exc_name}: [message withheld: secret detected ({findings[0].kind})]"
+        return message
 
     def _resolve_approval(self, result: GateResult) -> GateResult:
         """Called by run/run_all on NEEDS_APPROVAL. Fail closed without a handler."""

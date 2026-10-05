@@ -8,9 +8,17 @@ are out of detection scope by design.
 
 from __future__ import annotations
 
+import dataclasses
+import datetime as _dt
+import decimal
+import enum
 import math
+import numbers
 import re
+import uuid
 from collections import Counter
+from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any, Iterator, Literal
 
@@ -151,22 +159,61 @@ class Shield:
         return out, findings
 
     def redact_args(self, args: dict[str, Any]) -> tuple[dict[str, Any], list[Finding]]:
+        """Redact secrets anywhere in args, keys included, keeping container types.
+
+        Raises on input it cannot walk safely (a reference cycle, nesting deeper
+        than the interpreter allows, an object whose str() raises); the gate turns
+        that into a block or a withheld output, never into a pass-through.
+        """
         findings: list[Finding] = []
+        active: set[int] = set()
+
+        def text(value: str, path: str) -> str:
+            clean, found = self.redact_text(value)
+            for f in found:
+                f.arg = path
+            findings.extend(found)
+            return clean
 
         def transform(value: Any, path: str) -> Any:
             if isinstance(value, str):
-                clean, found = self.redact_text(value)
+                return text(value, path)
+            if isinstance(value, (bytes, bytearray)):
+                decoded = bytes(value).decode("utf-8", "replace")
+                clean = text(decoded, path)
+                return value if clean == decoded else type(value)(clean.encode("utf-8"))
+            if _is_inert(value):
+                return value
+            if id(value) in active:
+                raise ValueError(f"reference cycle at {path or 'value'}")
+            active.add(id(value))
+            try:
+                if isinstance(value, Mapping):
+                    return {
+                        transform(k, _key_path(path)): transform(v, _child_path(path, k))
+                        for k, v in value.items()
+                    }
+                if isinstance(value, tuple) and hasattr(value, "_fields"):  # namedtuple
+                    return type(value)(*(transform(v, f"{path}[{i}]") for i, v in enumerate(value)))
+                if isinstance(value, (list, tuple)):
+                    return type(value)(transform(v, f"{path}[{i}]") for i, v in enumerate(value))
+                if isinstance(value, AbstractSet):
+                    return type(value)(transform(v, f"{path}[{i}]") for i, v in enumerate(value))
+                # Anything else (a dataclass, a driver row, an arbitrary object) cannot be
+                # rebuilt with its secret removed. If it carries one, replace it whole.
+                found = self.scan_args({"v": value})
+                if not found:
+                    return value
                 for f in found:
                     f.arg = path
                 findings.extend(found)
-                return clean
-            if isinstance(value, dict):
-                return {k: transform(v, f"{path}.{k}") for k, v in value.items()}
-            if isinstance(value, list):
-                return [transform(v, f"{path}[{i}]") for i, v in enumerate(value)]
-            return value
+                return self._placeholder("object")
+            finally:
+                active.discard(id(value))
 
-        clean_args = {k: transform(v, k) for k, v in args.items()}
+        clean_args = {
+            transform(k, _key_path("")): transform(v, _child_path("", k)) for k, v in args.items()
+        }
         return clean_args, findings
 
     def restore(self, text: str) -> str:
@@ -179,12 +226,65 @@ class Shield:
         return f"[REDACTED:{kind}-{self._counts[kind]}]"
 
 
+# Values that cannot carry free text from the model or a data source.
+_INERT = (
+    numbers.Number, decimal.Decimal, _dt.date, _dt.time, _dt.timedelta, uuid.UUID,
+    enum.Enum, type(None),
+)
+
+
+def _is_inert(value: Any) -> bool:
+    return isinstance(value, _INERT)
+
+
+def _child_path(path: str, key: Any) -> str:
+    return f"{path}.{key}" if path else str(key)
+
+
+def _key_path(path: str) -> str:
+    return f"{path}.<key>" if path else "<key>"
+
+
 def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
-    if isinstance(value, str):
-        yield path or "value", value
-    elif isinstance(value, dict):
-        for k, v in value.items():
-            yield from _walk_strings(v, f"{path}.{k}" if path else str(k))
-    elif isinstance(value, list):
-        for i, v in enumerate(value):
-            yield from _walk_strings(v, f"{path}[{i}]")
+    """Yield (path, text) for every piece of text reachable from value.
+
+    Iterative, so nesting depth cannot raise RecursionError, and cycle-safe.
+    Covers str, bytes, mapping keys and values, list/tuple/set, dataclasses, and
+    objects with attributes; anything else is scanned through str(). A str()
+    that raises propagates, and callers treat that as fail-closed.
+    """
+    seen: set[int] = set()
+    stack: list[tuple[Any, str]] = [(value, path)]
+    while stack:
+        item, where = stack.pop()
+        if isinstance(item, str):
+            yield where or "value", item
+            continue
+        if isinstance(item, (bytes, bytearray, memoryview)):
+            yield where or "value", bytes(item).decode("utf-8", "replace")
+            continue
+        if _is_inert(item):
+            continue
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, Mapping):
+            for k, v in item.items():
+                stack.append((k, _key_path(where)))
+                stack.append((v, _child_path(where, k)))
+        elif isinstance(item, (list, tuple, AbstractSet)):
+            for i, v in enumerate(item):
+                stack.append((v, f"{where}[{i}]"))
+        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+            for fld in dataclasses.fields(item):
+                stack.append((getattr(item, fld.name, None), _child_path(where, fld.name)))
+        elif callable(getattr(item, "keys", None)) and hasattr(item, "__getitem__"):
+            # Row-like objects (sqlite3.Row, many driver records).
+            for k in item.keys():
+                stack.append((k, _key_path(where)))
+                stack.append((item[k], _child_path(where, k)))
+        elif hasattr(item, "__dict__") and not isinstance(item, type):
+            stack.append((vars(item), where))
+            yield where or "value", str(item)
+        else:
+            yield where or "value", str(item)
