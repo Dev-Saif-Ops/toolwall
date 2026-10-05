@@ -140,3 +140,18 @@ def test_openai_shape_end_to_end():
     result = make_gate().run(payload)
     assert result.executed
     assert result.return_value == {"q": "cve", "limit": 3}
+
+
+def test_deny_is_the_default_when_nothing_is_passed():
+    # Every other test passes default= explicitly, so flipping the default
+    # value itself went unnoticed (mutation run, 2026-10-05). Pin it.
+    from toolwall import ToolWall
+    gate = Gate()
+    gate.register("t", lambda: None)
+    assert gate.default == "deny"
+    assert gate.run({"name": "t", "args": {}}).verdict is Verdict.BLOCK
+
+    wall = ToolWall()
+    wall.register("t", lambda: None)
+    assert wall.gate.default == "deny"
+    assert wall.call("t").verdict is Verdict.BLOCK
