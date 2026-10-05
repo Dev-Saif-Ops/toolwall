@@ -8,7 +8,6 @@ are out of detection scope by design.
 
 from __future__ import annotations
 
-import copy
 import dataclasses
 import datetime as _dt
 import decimal
@@ -18,9 +17,8 @@ import numbers
 import re
 import types
 import uuid
-from collections import Counter, deque
-from collections.abc import Iterator, Mapping, MutableMapping
-from collections.abc import Set as AbstractSet
+from collections import Counter, OrderedDict, defaultdict, deque
+from collections.abc import ItemsView, Iterator, KeysView, Mapping, Sequence, ValuesView
 from dataclasses import dataclass
 from typing import Any, Iterator, Literal
 
@@ -161,7 +159,7 @@ class Shield:
         return out, findings
 
     def redact_args(self, args: dict[str, Any]) -> tuple[dict[str, Any], list[Finding]]:
-        """Redact secrets anywhere in args, keys included, keeping container types.
+        """Redact secrets anywhere in args, keys included, without mutating them.
 
         Raises on input it cannot walk safely (a reference cycle, nesting deeper
         than the interpreter allows, an object whose str() raises); the gate turns
@@ -178,44 +176,43 @@ class Shield:
             return clean
 
         def transform(value: Any, path: str) -> Any:
+            """Return value with secrets redacted. Never mutates value.
+
+            A subtree without findings comes back as the very same object, so
+            redaction cannot change the type, identity or contents of anything
+            that did not carry a secret, and never writes into a tool's data
+            source (an os.environ, a shelve file, a mapping over a database).
+            """
             if isinstance(value, str):
                 return text(value, path)
             if isinstance(value, (bytes, bytearray)):
                 decoded = bytes(value).decode("utf-8", "replace")
                 clean = text(decoded, path)
                 return value if clean == decoded else type(value)(clean.encode("utf-8"))
-            if _is_inert(value) or _is_code(value):
+            if _is_inert(value):
                 return value
             if id(value) in active:
                 raise ValueError(f"reference cycle at {path or 'value'}")
             active.add(id(value))
+            before = len(findings)
             try:
-                if isinstance(value, Mapping):
+                if isinstance(value, Mapping) and not _is_code(value):
                     items = [
                         (transform(k, _key_path(path)), transform(v, _child_path(path, k)))
                         for k, v in value.items()
                     ]
-                    if type(value) is not dict and isinstance(value, MutableMapping):
-                        # OrderedDict, defaultdict, Counter...: keep the type and its
-                        # configuration (default_factory) by refilling a shallow copy.
-                        try:
-                            rebuilt = copy.copy(value)
-                            rebuilt.clear()
-                            rebuilt.update(items)
-                            return rebuilt
-                        except Exception:
-                            pass
-                    return dict(items)
-                if isinstance(value, tuple) and hasattr(value, "_fields"):  # namedtuple
-                    return type(value)(*(transform(v, f"{path}[{i}]") for i, v in enumerate(value)))
-                if isinstance(value, deque):
-                    return deque((transform(v, f"{path}[{i}]") for i, v in enumerate(value)), value.maxlen)
-                if isinstance(value, (list, tuple)):
-                    return type(value)(transform(v, f"{path}[{i}]") for i, v in enumerate(value))
-                if isinstance(value, AbstractSet):
-                    return type(value)(transform(v, f"{path}[{i}]") for i, v in enumerate(value))
-                # Anything else (a dataclass, a driver row, an arbitrary object) cannot be
-                # rebuilt with its secret removed. If it carries one, replace it whole.
+                    if len(findings) == before:
+                        return value
+                    return _rebuild_mapping(value, items)
+                if isinstance(value, (list, tuple, deque, set, frozenset)):
+                    parts = [transform(v, f"{path}[{i}]") for i, v in enumerate(value)]
+                    if len(findings) == before:
+                        return value
+                    return _rebuild_sequence(value, parts)
+                # Anything else (code, a dataclass, a driver row, a view, an arbitrary
+                # object) cannot be rebuilt with its secret removed. Scan it the way
+                # the walker does; if it carries a secret, replace it whole. A lazy
+                # iterable raises UnscannableError and the output is withheld.
                 found = self.scan_args({"v": value})
                 if not found:
                     return value
@@ -267,7 +264,7 @@ def scrub_text(text: Any, shield: "Shield | None" = None) -> Any:
 # Values that cannot carry free text from the model or a data source.
 _INERT = (
     numbers.Number, decimal.Decimal, _dt.date, _dt.time, _dt.timedelta, uuid.UUID,
-    enum.Enum, type(None),
+    enum.Enum, type(None), range,
 )
 
 
@@ -276,8 +273,9 @@ def _is_inert(value: Any) -> bool:
 
 
 # Classes, modules and functions are code, not data a tool read from somewhere.
-# Walking them would wander into module globals (os.environ) and call keys() on
-# classes; neither says anything about what the tool is handing back.
+# Walking into them would wander through module globals (os.environ) and call
+# keys() on classes, so they are not walked. Their str() is still scanned: a
+# bound method returned by mistake (`return record.to_dict`) prints its record.
 _CODE = (
     type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType,
     types.MethodType, types.BuiltinMethodType,
@@ -290,6 +288,38 @@ def _is_code(value: Any) -> bool:
 
 class UnscannableError(TypeError):
     """A value whose content cannot be known without consuming it."""
+
+
+def _rebuild_mapping(value: Mapping, items: list[tuple[Any, Any]]) -> dict:
+    # Constructors only: never copy-and-refill, which writes through mappings that
+    # are views over real storage. Unknown mapping types come back as a plain dict.
+    if isinstance(value, Counter):
+        return Counter(dict(items))
+    if isinstance(value, defaultdict):
+        return defaultdict(value.default_factory, items)
+    if isinstance(value, OrderedDict):
+        return OrderedDict(items)
+    return dict(items)
+
+
+def _rebuild_sequence(value: Any, parts: list[Any]) -> Any:
+    if isinstance(value, tuple) and hasattr(value, "_fields"):  # namedtuple
+        return type(value)(*parts)
+    if isinstance(value, deque):
+        return deque(parts, value.maxlen)
+    for kind in (list, tuple, set, frozenset):
+        if isinstance(value, kind):
+            return kind(parts)
+    return list(parts)
+
+
+def _unscannable(item: Any) -> UnscannableError:
+    # The type name only: the path is built from the output's own keys, which
+    # should not reach the reason or the audit log.
+    return UnscannableError(
+        f"{type(item).__name__} is lazy: what it yields cannot be scanned without "
+        "consuming it; materialise it (list(), fetchall()) before returning it"
+    )
 
 
 def _child_path(path: str, key: Any) -> str:
@@ -306,7 +336,8 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
     Iterative, so nesting depth cannot raise RecursionError, and cycle-safe.
     Covers str, bytes, mapping keys and values, list/tuple/set, dataclasses,
     row-like objects and objects with attributes; anything else is scanned
-    through str(). Lazy iterators (generators, cursors, map objects) raise
+    through str(). Lazy iterables (generators, cursors, map objects, ORM query
+    sets: anything iterable that is not a known container) raise
     UnscannableError: their str() says nothing about what they will yield.
     Anything that raises propagates, and callers treat that as fail-closed.
     """
@@ -324,22 +355,23 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
         if isinstance(item, (bytes, bytearray, memoryview)):
             yield where or "value", bytes(item).decode("utf-8", "replace")
             continue
-        if _is_inert(item) or _is_code(item):
+        if _is_inert(item):
+            continue
+        if _is_code(item):
+            yield where or "value", str(item)
             continue
         if id(item) in seen:
             continue
         seen.add(id(item))
         keep.append(item)
         if isinstance(item, Iterator):
-            raise UnscannableError(
-                f"{type(item).__name__} at {where or 'value'} is a lazy iterator; "
-                "materialise it (list(), fetchall()) before returning it"
-            )
+            raise _unscannable(item)
         if isinstance(item, Mapping):
             for k, v in item.items():
                 stack.append((k, _key_path(where)))
                 stack.append((v, _child_path(where, k)))
-        elif isinstance(item, (list, tuple, AbstractSet)):
+        elif isinstance(item, (Sequence, set, frozenset, KeysView, ValuesView, ItemsView, deque)):
+            # Containers whose iteration does not consume anything.
             for i, v in enumerate(item):
                 stack.append((v, f"{where}[{i}]"))
         elif dataclasses.is_dataclass(item):
@@ -355,6 +387,8 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
             if hasattr(item, "__dict__"):
                 stack.append((vars(item), where))
             yield where or "value", str(item)
+        elif hasattr(item, "__iter__"):
+            raise _unscannable(item)
         elif hasattr(item, "__dict__"):
             stack.append((vars(item), where))
             yield where or "value", str(item)

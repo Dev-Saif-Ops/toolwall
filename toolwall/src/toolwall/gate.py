@@ -170,6 +170,10 @@ class Gate:
         self._budget: dict[str, Any] = {}
         self._executed_calls = 0
         self._executed_per_tool: dict[str, int] = {}
+        # Results this gate issued and has not run yet: id -> (result, tool name,
+        # receipt) as they stood at check time. execute() trusts this, not the
+        # mutable fields on the result, and an entry is spent when it is used.
+        self._issued: dict[int, tuple[GateResult, str, str | None]] = {}
 
     def register(
         self,
@@ -377,12 +381,29 @@ class Gate:
             joined = "; ".join(result.reasons) or "no call"
             raise PermissionError(f"refusing to execute a {result.verdict.value} result: {joined}")
 
-        execute_args = result.call.args  # unreceipted opt-out runs the live args
+        # One verdict authorises one execution of the call it was issued for. The
+        # issue record is taken (and so spent) under the lock: two threads handing in
+        # the same result cannot both get it. A result the gate never issued, or one
+        # already used, does not run.
+        with self._lock:
+            issued = self._issued.pop(id(result), None)
+        if issued is None or issued[0] is not result:
+            return self._refuse(
+                result,
+                "receipt already spent, or this result was not issued by this gate; "
+                "re-check the call instead of replaying an approved result",
+            )
+        _, checked_name, receipt = issued
 
-        # A receipted tool never runs without its receipt. Otherwise any code holding
-        # the result (an approval handler included) could edit the args, clear the
-        # receipt, and have the edited call run.
-        if result.receipt is None and self.registry.wants_receipt(result.call.name):
+        # Code holding the result (an approval handler included) can edit it. The
+        # tool, and for receipted tools the arguments, must be what was checked.
+        if result.call.name != checked_name:
+            return self._refuse(
+                result, "tool changed between check and execute; refusing to run it"
+            )
+
+        execute_args = result.call.args  # unreceipted opt-out runs the live args
+        if receipt is None and self.registry.wants_receipt(checked_name):
             return self._refuse(
                 result, "no receipt bound to this result; re-check the call before running it"
             )
@@ -390,7 +411,7 @@ class Gate:
         # The verdict was about specific arguments. If they are not the arguments we
         # are about to run, the verdict does not apply to this call. Refuse, and do
         # not spend budget on it.
-        if result.receipt is not None:
+        if receipt is not None:
             # Freeze first, then hash the frozen copy, then run the tool on that same
             # frozen copy. Hashing the live object and then passing the live object
             # would leave a window after the hash passes in which another thread can
@@ -398,30 +419,16 @@ class Gate:
             # the call. The tool must only ever see the snapshot that was verified.
             try:
                 frozen_args = copy.deepcopy(result.call.args)
-                current = fingerprint(result.call.name, frozen_args)
+                current = fingerprint(checked_name, frozen_args)
             except Exception as exc:  # ReceiptError or a failed copy: refuse either way
                 current = f"unverifiable: {exc}"
-            if current != result.receipt:
+            if current != receipt:
                 return self._refuse(
                     result,
                     "arguments changed between check and execute; refusing to run "
                     "a call the gate did not approve",
                 )
-            # One verdict authorises one execution. Check-and-set under the lock, or
-            # two threads handing in the same result both pass the flag and the tool
-            # runs twice on one verdict.
-            with self._lock:
-                if result.receipt_spent:
-                    spent = True
-                else:
-                    result.receipt_spent = True
-                    spent = False
-            if spent:
-                return self._refuse(
-                    result,
-                    "receipt already spent; re-check the call instead of replaying "
-                    "an approved result",
-                )
+            result.receipt_spent = True
             # The snapshot must never be reachable through the result object, or a
             # thread holding the result could mutate what the tool is reading. The
             # result keeps the checked args; the hash just proved the two identical.
@@ -626,6 +633,9 @@ class Gate:
         return scrub_text(text, self.shield)
 
     def _record(self, result: GateResult) -> GateResult:
+        if result.call is not None and result.verdict in (Verdict.ALLOW, Verdict.NEEDS_APPROVAL):
+            with self._lock:
+                self._issued[id(result)] = (result, result.call.name, result.receipt)
         # Reasons echo model-chosen tool names, arg keys and cross-rule text. They go
         # back to the model, into reports and into the audit log: scrub them once here.
         result.reasons = [self._scrub(r) for r in result.reasons]

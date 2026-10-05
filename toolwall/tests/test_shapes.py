@@ -8,7 +8,8 @@ exception message, or a secret used as a dict KEY all went through unscanned.
 import email
 import itertools
 import sqlite3
-from collections import OrderedDict, defaultdict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 
 import pytest
@@ -211,7 +212,11 @@ def test_email_message_body_is_scanned(mode):
 
 
 def test_fresh_containers_on_access_are_not_skipped_by_id_reuse():
+    # __slots__ so vars() cannot reach the data another way, and the secret row
+    # first so the LIFO walk visits it after the clean rows have been freed.
     class Row:
+        __slots__ = ("_d",)
+
         def __init__(self, data):
             self._d = data
 
@@ -221,8 +226,11 @@ def test_fresh_containers_on_access_are_not_skipped_by_id_reuse():
         def __getitem__(self, k):
             return {"v": self._d[k]}  # a new dict every access
 
-    rows = [Row({"c": "clean"}) for _ in range(50)] + [Row({"c": f"key {AWS_KEY}"})]
-    for _ in range(5):
+        def __repr__(self):
+            return "Row()"
+
+    rows = [Row({"c": f"key {AWS_KEY}"})] + [Row({"c": "clean"}) for _ in range(50)]
+    for _ in range(20):
         result = gate_returning(rows).run({"name": "tool", "args": {}})
         assert result.return_value is None
 
@@ -245,3 +253,131 @@ def test_redact_keeps_dict_subclasses_and_deques():
     assert type(out["dd"]) is defaultdict and out["dd"].default_factory is list
     assert type(out["dq"]) is deque
     assert AWS_KEY not in repr(out)
+
+
+# --- round 3 (2026-10-05) ---------------------------------------------------
+
+
+class Store(MutableMapping):
+    """A mapping view over a backing store (like os.environ or a shelve file)."""
+
+    def __init__(self, backing):
+        self.backing = backing
+
+    def __getitem__(self, k):
+        return self.backing[k]
+
+    def __setitem__(self, k, v):
+        self.backing[k] = v
+
+    def __delitem__(self, k):
+        del self.backing[k]
+
+    def __iter__(self):
+        return iter(self.backing)
+
+    def __len__(self):
+        return len(self.backing)
+
+
+def test_redaction_never_writes_back_into_the_source():
+    backing = {"AWS_ACCESS_KEY_ID": AWS_KEY, "HOME": "/home/x"}
+    store = Store(backing)
+    result = gate_returning(store, mode="redact").run({"name": "tool", "args": {}})
+    assert backing == {"AWS_ACCESS_KEY_ID": AWS_KEY, "HOME": "/home/x"}
+    assert AWS_KEY not in repr(result.return_value)
+
+    od = OrderedDict(a=f"key {AWS_KEY}")
+    gate_returning(od, mode="redact").run({"name": "tool", "args": {}})
+    assert od == OrderedDict(a=f"key {AWS_KEY}")
+
+
+def test_redaction_keeps_counter_values():
+    value = {"counts": Counter({"apple": 3}), "note": f"key {AWS_KEY}"}
+    result = gate_returning(value, mode="redact").run({"name": "tool", "args": {}})
+    assert result.return_value["counts"]["apple"] == 3
+    assert type(result.return_value["counts"]) is Counter
+
+
+def test_clean_subtrees_come_back_as_the_same_objects_in_redact_mode():
+    # Only the parts that carried a secret are rebuilt; everything else is the
+    # tool's own object, untouched and with its own type.
+    store = Store({"HOME": "/home/x"})
+    rows = [(1, "a")]
+    value = {"store": store, "rows": rows, "note": f"key {AWS_KEY}"}
+    result = gate_returning(value, mode="redact").run({"name": "tool", "args": {}})
+    assert result.return_value is not value
+    assert result.return_value["store"] is store
+    assert result.return_value["rows"] is rows
+    assert AWS_KEY not in result.return_value["note"]
+
+
+@dataclass
+class Record:
+    key: str
+
+    def to_dict(self):
+        return {"key": self.key}
+
+
+@pytest.mark.parametrize("mode", ["block", "redact"])
+def test_bound_method_returned_by_mistake_is_still_scanned(mode):
+    # return record.to_dict  (forgot the parentheses): str() shows the record.
+    rec = Record(f"key {AWS_KEY}")
+    result = gate_returning(rec.to_dict, mode=mode).run({"name": "tool", "args": {}})
+    assert AWS_KEY not in str(result.return_value)
+    assert result.findings or result.error
+
+
+class LazyRows:
+    """Iterable but not an iterator, like an ORM QuerySet."""
+
+    def __iter__(self):
+        return iter([f"key {AWS_KEY}"])
+
+    def __repr__(self):
+        return "<LazyRows>"
+
+
+@pytest.mark.parametrize("mode", ["block", "redact"])
+def test_lazy_iterables_that_are_not_iterators_are_withheld(mode):
+    result = gate_returning(LazyRows(), mode=mode).run({"name": "tool", "args": {}})
+    assert result.return_value is None
+    assert "withheld" in result.error
+
+
+@pytest.mark.parametrize("mode", ["block", "redact"])
+def test_dict_views_are_scanned_not_withheld(mode):
+    clean = {"a": "x"}.keys()
+    result = gate_returning(clean, mode=mode).run({"name": "tool", "args": {}})
+    assert result.error is None and result.return_value is clean
+    leaky = {"a": f"key {AWS_KEY}"}.items()
+    result = gate_returning(leaky, mode=mode).run({"name": "tool", "args": {}})
+    assert AWS_KEY not in repr(result.return_value)
+
+
+def test_row_like_object_str_is_scanned_when_keys_hide_the_data():
+    class Message:
+        __slots__ = ("body",)
+
+        def __init__(self, body):
+            self.body = body
+
+        def keys(self):
+            return ["subject"]
+
+        def __getitem__(self, k):
+            return "hello"
+
+        def __str__(self):
+            return f"subject: hello\n\n{self.body}"
+
+    result = gate_returning(Message(f"key {AWS_KEY}")).run({"name": "tool", "args": {}})
+    assert result.return_value is None
+
+
+def test_unscannable_reason_does_not_carry_output_keys():
+    value = {"customer-acme-internal-id-77": (x for x in [])}
+    result = gate_returning(value).run({"name": "tool", "args": {}})
+    assert result.return_value is None
+    assert "customer-acme" not in result.error

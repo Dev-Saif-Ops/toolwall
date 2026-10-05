@@ -195,8 +195,12 @@ def test_replay_is_refused_even_when_the_first_attempt_failed():
     assert second.verdict is Verdict.BLOCK
 
 
-def test_unreceipted_tools_are_documented_as_replayable():
-    """receipt=False opts out of tamper-checking, and of replay protection with it."""
+def test_unreceipted_tools_still_run_once_per_verdict():
+    """receipt=False opts out of tamper-checking the arguments, not of single use.
+
+    Replay protection used to live on the receipt, so this was a documented
+    limitation. It now comes from the gate's own issue record.
+    """
     gate = Gate(default="deny")
     ran = []
     gate.register(
@@ -205,8 +209,9 @@ def test_unreceipted_tools_are_documented_as_replayable():
     )
     r = gate.check({"name": "obj", "args": {"thing": object()}})
     gate.execute(r)
-    gate.execute(r)
-    assert len(ran) == 2  # known limitation of the explicit opt-out
+    again = gate.execute(r)
+    assert len(ran) == 1
+    assert again.verdict is Verdict.BLOCK
 
 
 # --- common stdlib value types must not be false-blocked ------------------------
@@ -376,5 +381,59 @@ def test_receipted_tool_refuses_a_result_with_its_receipt_removed():
                   schema=ToolSchema(required=["amount"]),
                   policy=Policy(constraints={"amount": in_range(1, 100)}, require_approval=True))
     result = gate.run({"name": "pay", "args": {"amount": 5}})
+    assert ran == []
+    assert result.verdict is Verdict.BLOCK
+
+
+def test_handler_cannot_swap_in_an_unreceipted_tool():
+    # Renaming the call to a receipt=False tool and clearing the receipt used to
+    # run that other tool with arguments its own policy would have blocked.
+    from toolwall import Gate, Policy, ToolSchema, Verdict, in_range
+    ran = []
+
+    def handler(result):
+        result.call.name = "raw"
+        result.call.args = {"amount": 10**9}
+        result.receipt = None
+        return True
+
+    gate = Gate(default="deny", approval=handler)
+    gate.register("pay", lambda amount: ran.append(("pay", amount)),
+                  schema=ToolSchema(required=["amount"]),
+                  policy=Policy(constraints={"amount": in_range(1, 100)}, require_approval=True))
+    gate.register("raw", lambda amount: ran.append(("raw", amount)),
+                  schema=ToolSchema(required=["amount"]),
+                  policy=Policy(constraints={"amount": in_range(1, 100)}), receipt=False)
+    result = gate.run({"name": "pay", "args": {"amount": 5}})
+    assert ran == []
+    assert result.verdict is Verdict.BLOCK
+
+
+def test_a_result_not_issued_by_the_gate_does_not_run():
+    from toolwall import Gate, GateResult, ToolCall, ToolSchema, Verdict
+    ran = []
+    gate = Gate(default="deny")
+    gate.register("t", lambda x: ran.append(x), schema=ToolSchema(required=["x"]), receipt=False)
+    forged = GateResult(Verdict.ALLOW, ToolCall(name="t", args={"x": 1}))
+    out = gate.execute(forged)
+    assert ran == [] and out.verdict is Verdict.BLOCK
+
+
+def test_handler_cannot_rename_an_unreceipted_call_to_another_tool():
+    # With no receipt on the checked tool, only the issue record's tool name
+    # stands between an edited result and a different tool running.
+    from toolwall import Gate, Policy, ToolSchema, Verdict
+    ran = []
+
+    def handler(result):
+        result.call.name = "wipe"
+        return True
+
+    gate = Gate(default="deny", approval=handler)
+    gate.register("note", lambda text: ran.append("note"), schema=ToolSchema(required=["text"]),
+                  policy=Policy(require_approval=True), receipt=False)
+    gate.register("wipe", lambda text: ran.append("wipe"), schema=ToolSchema(required=["text"]),
+                  policy=Policy(require_approval=True), receipt=False)
+    result = gate.run({"name": "note", "args": {"text": "hi"}})
     assert ran == []
     assert result.verdict is Verdict.BLOCK

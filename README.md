@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/toolwall.svg?cacheSeconds=300)](https://pypi.org/project/toolwall/)
 [![Python versions](https://img.shields.io/pypi/pyversions/toolwall.svg)](https://pypi.org/project/toolwall/)
 [![License: MIT](https://img.shields.io/pypi/l/toolwall.svg)](toolwall/LICENSE)
-[![Tests](https://img.shields.io/badge/tests-222%20passing-brightgreen.svg)](toolwall/tests)
+[![Tests](https://img.shields.io/badge/tests-236%20passing-brightgreen.svg)](toolwall/tests)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](toolwall/pyproject.toml)
 [![Failure suite](https://img.shields.io/badge/attack%20suite-35%2F35%20blocked-brightgreen.svg)](gate-suite/results/REPORT.md)
 
@@ -11,7 +11,7 @@
 >
 > Your LLM can generate a **valid** tool call. That doesn't mean it's **safe** to execute.
 
-**Status: v0.4.1 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 222 tests · published attack suite.**
+**Status: v0.4.1 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 236 tests · published attack suite.**
 
 ```bash
 pip install toolwall
@@ -100,7 +100,7 @@ Everything that isn't explicitly allowed is blocked. That is the whole idea.
 
 - **Fail-closed by default**: unknown tool, bad schema, policy violation, budget hit, or unparseable payload all block *before* the tool runs. Registration is the allowlist.
 - **Policy engine**: value constraints (`in_range`, `one_of`, `matches`, `email_domain`, `starts_with`, `ends_with`), cross-argument rules, human-approval flags, and budget caps (per run / per tool / USD) that hold on a Gate shared across threads.
-- **Secret detection, both directions**: AWS, OpenAI, GitHub, Stripe, Slack, JWT, PEM, and high-entropy strings caught in tool arguments *and in tool return values* (strings, dict keys and values, lists, tuples such as database rows, sets, bytes, dataclasses), then blocked or redacted. Output that cannot be scanned, including lazy iterators such as generators and database cursors, is withheld. Reasons, reports and the audit log are scrubbed of detected secrets.
+- **Secret detection, both directions**: AWS, OpenAI, GitHub, Stripe, Slack, JWT, PEM, and high-entropy strings caught in tool arguments *and in tool return values* (strings, dict keys and values, lists, tuples such as database rows, sets, bytes, dataclasses), then blocked or redacted. Output that cannot be scanned, including lazy iterables such as generators, cursors and file objects, is withheld: return plain, materialised data. Redaction rebuilds only what held a secret and never modifies the tool's own objects. Reasons, reports and the audit log are scrubbed of detected secrets.
 - **Dry-run**: run your whole agent with nothing executing, then read what it *would* have done and generate a starter policy from it.
 - **MCP guard**: `MCPGuard` runs the same check and execute path (budget, dry-run, receipts, output scanning) in front of a function that forwards to your MCP server.
 - **Audit trail**: every verdict exported to JSON/CSV.
@@ -192,8 +192,9 @@ def ask_human(result):
 wall = ToolWall(approval=ask_human)          # or wall.approve_with(ask_human)
 ```
 
-The handler cannot change what runs: the arguments are bound by a receipt at check
-time, an edited call is refused, and a receipted tool never runs without its receipt. Approving later (from Slack, a ticket, a phone)
+The handler cannot change what runs: the gate records each result it issues (tool
+and argument receipt), and runs a result only once, only for the tool that was
+checked, with the arguments that were checked. Approving later (from Slack, a ticket, a phone)
 is not supported yet: a held result cannot be executed after the fact, so re-run the
 call once the human has said yes.
 
@@ -248,7 +249,7 @@ Run the tests and the published attack suite yourself:
 
 ```bash
 cd toolwall && pip install -e ".[dev]"
-pytest                                    # 222 tests
+pytest                                    # 236 tests
 python ../gate-suite/run_suite.py         # 35/35 attacks blocked, prints the G1 report
 ```
 
