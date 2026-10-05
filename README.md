@@ -3,15 +3,15 @@
 [![PyPI version](https://img.shields.io/pypi/v/toolwall.svg?cacheSeconds=300)](https://pypi.org/project/toolwall/)
 [![Python versions](https://img.shields.io/pypi/pyversions/toolwall.svg)](https://pypi.org/project/toolwall/)
 [![License: MIT](https://img.shields.io/pypi/l/toolwall.svg)](toolwall/LICENSE)
-[![Tests](https://img.shields.io/badge/tests-155%20passing-brightgreen.svg)](toolwall/tests)
+[![Tests](https://img.shields.io/badge/tests-204%20passing-brightgreen.svg)](toolwall/tests)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](toolwall/pyproject.toml)
-[![Failure suite](https://img.shields.io/badge/attack%20suite-28%2F28%20blocked-brightgreen.svg)](gate-suite/results/REPORT.md)
+[![Failure suite](https://img.shields.io/badge/attack%20suite-35%2F35%20blocked-brightgreen.svg)](gate-suite/results/REPORT.md)
 
 > ## The security gateway for AI agent tool calls.
 >
 > Your LLM can generate a **valid** tool call. That doesn't mean it's **safe** to execute.
 
-**Status: v0.4.1 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 155 tests · published attack suite.**
+**Status: v0.4.1 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 204 tests · published attack suite.**
 
 ```bash
 pip install toolwall
@@ -99,18 +99,22 @@ Everything that isn't explicitly allowed is blocked. That is the whole idea.
 ## Features
 
 - **Fail-closed by default**: unknown tool, bad schema, policy violation, budget hit, or unparseable payload all block *before* the tool runs. Registration is the allowlist.
-- **Policy engine**: value constraints (`in_range`, `one_of`, `matches`, `ends_with`), cross-argument rules, human-approval flags, and budget caps (per run / per tool / USD).
-- **Secret detection, both directions**: AWS, OpenAI, GitHub, Stripe, Slack, JWT, PEM, and high-entropy strings caught in tool arguments *and in tool return values*, then blocked or redacted. The audit log never stores the value.
+- **Policy engine**: value constraints (`in_range`, `one_of`, `matches`, `email_domain`, `starts_with`, `ends_with`), cross-argument rules, human-approval flags, and budget caps (per run / per tool / USD) that hold on a Gate shared across threads.
+- **Secret detection, both directions**: AWS, OpenAI, GitHub, Stripe, Slack, JWT, PEM, and high-entropy strings caught in tool arguments *and in tool return values* (strings, dict keys and values, lists, tuples such as database rows, sets, bytes, dataclasses), then blocked or redacted. Output that cannot be scanned is withheld. Reasons, reports and the audit log are scrubbed of detected secrets.
 - **Dry-run**: run your whole agent with nothing executing, then read what it *would* have done and generate a starter policy from it.
-- **MCP guard**: put the same gate in front of any MCP server.
+- **MCP guard**: `MCPGuard` runs the same check and execute path (budget, dry-run, receipts, output scanning) in front of a function that forwards to your MCP server.
 - **Audit trail**: every verdict exported to JSON/CSV.
 - **Zero required dependencies**: stdlib only, Python 3.10+.
 
-**Proof, not promises:** the published suite blocks **28/28 attack cases across 11 classes
-with 0 false blocks** on clean traffic, at p95 0.07 ms overhead
+**Proof, not promises:** the published suite blocks **35/35 attack cases across 11 classes
+with 0 false blocks on its 14 clean cases**, at a per-call p95 well under a millisecond
+for small arguments (cost grows with argument size: about 2 ms at 50 KB). Ordinary text the
+shield is known to flag is listed in the report too
 ([full report](gate-suite/results/REPORT.md), reproduce with `python gate-suite/run_suite.py`).
-Secret detection is pattern + entropy based and is never 100%; the report states exactly
-
+The suite is a regression suite for one reference config, not a measure of coverage
+against attacks nobody has written yet. Secret detection is pattern + entropy based and
+is never 100%; the report states exactly what is and is not proven.
+**Try to break it. Issues and PRs welcome.**
 
 **The verdict covers the call, not the state of the world.** An approved
 `delete_records(id=42)` deletes whatever 42 points to at execution time; if the
@@ -119,7 +123,6 @@ never changed. Argument integrity is not resource integrity. For resources that 
 change owner or meaning, re-verify inside the tool's own transaction (for example
 compare-and-swap on a version column); the gate cannot see your datastore, and any
 external authorization layer that claims otherwise is overclaiming.
-what is and is not proven. **Try to break it. Issues and PRs welcome.**
 
 ## Why not just use the guardrails in my agent framework?
 
@@ -173,6 +176,27 @@ results = wall.guard(openai_response)   # OpenAI / Anthropic / Gemini shapes
 Only an `ALLOW` verdict executes the tool. `Gate` is the lower-level primitive
 underneath if you want to compose it yourself.
 
+Two policy details worth knowing: `matches()` is a full match (anchor nothing, the
+whole value must match), and `ends_with("@ourco.com")` is a string rule that a
+comma-separated recipient list passes. For recipients use `email_domain("ourco.com")`,
+which accepts exactly one bare address on that exact domain.
+
+**Approvals.** A `require_approval` tool is held (`r.needs_approval`) and never runs
+without a yes. Give the wall a handler and it is asked synchronously, with the
+`GateResult` (tool name and arguments) to decide on:
+
+```python
+def ask_human(result):
+    return input(f"run {result.call.name} {result.call.args}? [y/N] ") == "y"
+
+wall = ToolWall(approval=ask_human)          # or wall.approve_with(ask_human)
+```
+
+The handler cannot change what runs: the arguments are bound by a receipt at check
+time, and an edited call is refused. Approving later (from Slack, a ticket, a phone)
+is not supported yet: a held result cannot be executed after the fact, so re-run the
+call once the human has said yes.
+
 ### 3. Start in dry-run: see what your agent would do, before it does anything
 
 ```python
@@ -198,7 +222,9 @@ guard = MCPGuard(wall.gate, forward=call_downstream_mcp_server)
 decision = guard.handle(tool_name, args)   # only ALLOW is forwarded; blocks return an MCP error
 ```
 
-Install the transport extra with `pip install 'toolwall[mcp]'`.
+`forward` is your own function that calls the downstream server. toolwall does not
+ship an MCP transport yet: `pip install 'toolwall[mcp]'` only installs the `mcp`
+package for that function to use.
 
 ## Examples
 
@@ -222,8 +248,8 @@ Run the tests and the published attack suite yourself:
 
 ```bash
 cd toolwall && pip install -e ".[dev]"
-pytest                                    # 155 tests
-python ../gate-suite/run_suite.py         # 28/28 attacks blocked, prints the G1 report
+pytest                                    # 204 tests
+python ../gate-suite/run_suite.py         # 35/35 attacks blocked, prints the G1 report
 ```
 
 ## Roadmap (Phase 0 → 1)
@@ -232,10 +258,10 @@ python ../gate-suite/run_suite.py         # 28/28 attacks blocked, prints the G1
 - [x] Fail-closed gate + schema layer + audit meter
 - [x] Policy engine: value constraints, cross-arg rules, approval flags, budget caps
 - [x] Shield: secret detection/redaction on tool args and text (registration is the allowlist)
-- [x] Failure-scenario suite: 28 attacks across 11 classes, report published per release
+- [x] Failure-scenario suite: 35 attacks across 11 classes, report published per release
 - [x] Dry-run mode: full agent run, zero execution, `gate.report()` "would-have-done" summary
 - [x] Suggested-policy generator: observed calls -> reviewable draft schema + policy
-- [x] `toolwall-mcp`: `MCPGuard` puts the gate in front of any MCP server (tested core; stdio wiring lands with first pilot)
+- [x] `toolwall-mcp`: `MCPGuard` runs the full gate in front of a forwarding function (tested core; stdio transport not shipped yet)
 - [x] Release-ready: builds clean, `twine check` passes, clean-install verified ([RELEASING.md](toolwall/RELEASING.md))
 - [x] **Published to PyPI**: [`pip install toolwall`](https://pypi.org/project/toolwall/)
 

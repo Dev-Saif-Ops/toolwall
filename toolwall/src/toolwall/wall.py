@@ -8,7 +8,8 @@ Shield and a Meter already attached, and gives you `register` + `call`.
 
     wall = ToolWall()                      # default-deny, secret detection + audit on
     wall.register("get_user", get_user, schema=ToolSchema(required=["id"]))
-    wall.register("delete_user", delete_user, policy=Policy(require_approval=True))
+    wall.register("delete_user", delete_user, schema=ToolSchema(required=["id"]),
+                  policy=Policy(require_approval=True))
 
     result = wall.call("get_user", {"id": "123"})       # ALLOW -> runs
     result = wall.call("delete_user", {"id": "123"})    # held for approval

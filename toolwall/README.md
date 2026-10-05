@@ -77,16 +77,20 @@ Everything not explicitly allowed is blocked. That is the whole idea.
 
 - **Fail-closed gate**: unknown tool, schema violation, policy violation, budget hit,
   or unparseable payload all block *before* the tool runs. Registration is the allowlist.
-- **Policy engine**: value constraints (`in_range`, `one_of`, `matches`, `ends_with`…),
+- **Policy engine**: value constraints (`in_range`, `one_of`, `matches`, `email_domain`…),
   cross-argument rules, human-approval flags, and budget caps (calls / per-tool / USD).
+  For recipients use `email_domain("ourco.com")`, not `ends_with`: a comma-separated
+  list ends with your domain too.
 - **Shield, both directions**: detects secrets (AWS, OpenAI, GitHub, Stripe, Slack,
   JWT, PEM, and high-entropy strings) in tool arguments *and in tool return values*,
-  then blocks or redacts them. A tool that reads a secret out of a database can't
-  hand it back to the model. The audit log never contains the secret value.
+  then blocks or redacts them, including in dict keys, tuples (database rows), sets,
+  bytes and dataclasses. Output that cannot be scanned is withheld. Reasons, reports
+  and the audit log are scrubbed of detected secrets.
 - **Dry-run**: run your whole agent with `dry_run=True`: nothing executes, and
   `gate.report()` tells you what it *would* have done. `suggest_policies(gate)` drafts
   a starter policy from the calls it observed.
-- **MCP guard**: `MCPGuard` puts the same gate in front of any MCP server.
+- **MCP guard**: `MCPGuard` runs the same check and execute path (budget, dry-run,
+  receipts, output scanning) in front of a function that forwards to your MCP server.
 - **Audit trail**: every verdict exported to JSON/CSV.
 
 ## Why not just the guardrails in my agent framework?
@@ -124,7 +128,8 @@ guard = MCPGuard(gate, forward=call_downstream_mcp_server)
 decision = guard.handle(tool_name, args)   # only ALLOW is forwarded
 ```
 
-Install the transport extra with `pip install "toolwall[mcp]"`.
+`forward` is your own function that calls the downstream server; no MCP transport
+ships yet. `pip install "toolwall[mcp]"` only installs the `mcp` package.
 
 ## Examples
 
@@ -143,8 +148,11 @@ python examples/live_gemini_agent.py     # set GEMINI_API_KEY first
 
 ## Honest status
 
-`toolwall` is alpha. The published failure suite blocks **28 of 28 attack cases across
-11 classes with 0 false blocks** on clean traffic, at sub-millisecond overhead. Secret
+`toolwall` is alpha. The published failure suite blocks **35 of 35 attack cases across
+11 classes with 0 false blocks on its 14 clean cases**, at sub-millisecond per-call
+overhead for small arguments (about 2 ms at 50 KB). It is a regression suite for one
+reference config, not a coverage measure, and it lists ordinary text the shield is
+known to flag. Secret
 detection is pattern + entropy based and is **never 100%**. Structureless passwords are
 out of scope, and the suite report states exactly what is and is not proven. Every claim
 about toolwall cites that report, nothing broader.

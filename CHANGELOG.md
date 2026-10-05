@@ -1,5 +1,52 @@
 # Changelog
 
+## [Unreleased]
+
+Findings from a three-lens red-team (bypass hunting, claims and mutation
+testing, a first-time user wiring a live local agent). Every fix below has a
+test that fails on 0.4.1.
+
+### Security
+- **Output secrets leaked in common shapes.** The shield only walked str, dict
+  values and lists. Database rows from `fetchall()` (tuples), sets, bytes,
+  dataclasses, driver row objects, other objects, and secrets used as dict keys
+  passed through unscanned, in arguments and in return values. The walker now
+  covers all of these, iteratively and cycle-safe; redaction keeps container
+  types and covers keys.
+- **Output scanning failed open.** A scan that raised left the unscanned return
+  value in place. It is now withheld. A tool's exception text is scanned before
+  it reaches the model or the audit log.
+- **Secrets reached the audit log through reasons.** "unknown tool", "Unexpected
+  arg", argument paths and cross-rule messages echoed model-chosen text verbatim
+  into reasons, the report and the JSON/CSV export. All of them are scrubbed.
+- **MCPGuard bypassed execute-time controls.** It called `check()` and then the
+  forward function directly: no budget, dry-run still forwarded, no output scan,
+  no receipt check. It now forwards through `Gate.execute(result, invoke=...)`.
+- **`in_range` accepted NaN** (and `"nan"`, `Decimal("NaN")`), and the test that
+  claimed to cover it never reached the policy. Non-finite values and bools are
+  now out of range, and NaN/Infinity literals in argument JSON are an intake error.
+- **Budgets did not hold on a shared Gate.** The budget was read at check time and
+  incremented at execute time; 32 threads against `max_calls=1` ran the tool up to
+  24 times. `execute()` now re-checks and reserves the slot atomically.
+- **The recommended recipient rule was bypassable.** `ends_with("@ourco.com")`
+  passes `"attacker@evil.com,ops@ourco.com"`. New `email_domain()` accepts one bare
+  address on an exact domain; examples and the suite use it.
+
+### Changed
+- Anything that raises while checking a call (deep nesting, hostile objects) is a
+  BLOCK instead of an exception.
+- Execute-time refusals return a new BLOCK result instead of rewriting the ALLOW,
+  so history never says an executed call was blocked.
+- gate-suite: 100% pass bar (was 90%), true per-call p95, overhead by argument
+  size, seven new attacks and three new clean cases, and a published list of
+  known false positives. 155 to 204 tests.
+
+### Docs
+- Fixed a paragraph spliced into the middle of a README sentence.
+- Scoped the false-block and latency claims to what the suite measures.
+- Documented approvals, `matches()` being a full match, and that no MCP transport
+  ships yet.
+
 ## [0.4.1] - 2026-08-29
 
 ### Security
