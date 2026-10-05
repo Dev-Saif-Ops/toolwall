@@ -225,10 +225,9 @@ class Gate:
     def _budget_violation(self, call: ToolCall) -> str | None:
         """Read budget counters under the lock.
 
-        Note: this reads state; the increment happens in execute(). A Gate is
-        intended for one agent run. Under heavy concurrent use on a shared Gate,
-        counters stay consistent but a check/execute race can still admit an
-        extra call. Use one Gate per agent execution context.
+        This is the early, advisory check. execute() re-checks and reserves the
+        slot atomically, so a Gate shared across threads still never exceeds a
+        budget; calls that lose the race are refused at execute time.
         """
         if not self._budget:
             return None
@@ -395,13 +394,11 @@ class Gate:
             except Exception as exc:  # ReceiptError or a failed copy: refuse either way
                 current = f"unverifiable: {exc}"
             if current != result.receipt:
-                result.verdict = Verdict.BLOCK
-                result.reasons.append(
+                return self._refuse(
+                    result,
                     "arguments changed between check and execute; refusing to run "
-                    "a call the gate did not approve"
+                    "a call the gate did not approve",
                 )
-                result.executed = False
-                return result
             # One verdict authorises one execution. Check-and-set under the lock, or
             # two threads handing in the same result both pass the flag and the tool
             # runs twice on one verdict.
@@ -412,23 +409,29 @@ class Gate:
                     result.receipt_spent = True
                     spent = False
             if spent:
-                result.verdict = Verdict.BLOCK
-                result.reasons.append(
+                return self._refuse(
+                    result,
                     "receipt already spent; re-check the call instead of replaying "
-                    "an approved result"
+                    "an approved result",
                 )
-                result.executed = False
-                return result
             # The snapshot must never be reachable through the result object, or a
             # thread holding the result could mutate what the tool is reading. The
             # result keeps the checked args; the hash just proved the two identical.
             execute_args = frozen_args
 
+        # Re-check the budget and reserve the slot in one critical section. The check
+        # in check() is advisory: between it and here other threads sharing this Gate
+        # may have executed, and without this a burst of parallel calls all pass a
+        # max_calls=1 read at counter 0.
         with self._lock:
-            self._executed_calls += 1
-            self._executed_per_tool[result.call.name] = (
-                self._executed_per_tool.get(result.call.name, 0) + 1
-            )
+            budget_reason = self._budget_violation_locked(result.call) if self._budget else None
+            if budget_reason is None:
+                self._executed_calls += 1
+                self._executed_per_tool[result.call.name] = (
+                    self._executed_per_tool.get(result.call.name, 0) + 1
+                )
+        if budget_reason is not None:
+            return self._refuse(result, budget_reason)
         if self.dry_run:
             result.dry_run = True
             if self.meter is not None:
@@ -475,6 +478,20 @@ class Gate:
                 )
             )
         return result
+
+    def _refuse(self, result: GateResult, reason: str) -> GateResult:
+        """A refusal at execute time is a new BLOCK result, recorded like any other.
+
+        The ALLOW it refuses stays as it was: rewriting it in place would make the
+        history say a call that already ran was blocked.
+        """
+        refused = copy.copy(result)
+        refused.verdict = Verdict.BLOCK
+        refused.reasons = [*result.reasons, reason]
+        refused.findings = list(result.findings)
+        refused.executed = False
+        refused.return_value = None
+        return self._record(refused)
 
     def _scan_output(self, result: GateResult) -> None:
         """Scan what a tool returned before it travels back to the model.
