@@ -74,7 +74,9 @@ def ends_with(*suffixes: str) -> Rule:
     return _named(f"ends_with{suffixes!r}", rule)
 
 
-_EMAIL_LOCAL = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+")
+# RFC 5322 atext minus "%" and "!": both are legacy source-routing characters
+# (user%host@relay, host!user@relay) that some MTAs still rewrite to another domain.
+_EMAIL_LOCAL = re.compile(r"[A-Za-z0-9.#$&'*+/=?^_`{|}~-]+")
 
 
 def email_domain(*domains: str) -> Rule:
@@ -82,7 +84,7 @@ def email_domain(*domains: str) -> Rule:
 
     Rejects anything a mail API could read as more than one recipient or as an
     extra header: commas, semicolons, angle brackets, whitespace, CR/LF, a second
-    "@". Domains match exactly, case-insensitively; subdomains are not included
+    "@", and "%"/"!" source routing. Domains match exactly, case-insensitively; subdomains are not included
     (list them explicitly). Non-ASCII lookalikes never equal an ASCII domain.
     """
     allowed = {d.strip().lstrip("@").lower() for d in domains}

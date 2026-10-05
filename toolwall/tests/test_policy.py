@@ -133,3 +133,11 @@ def test_email_domain_rejects_the_ends_with_bypasses():
 def test_ends_with_still_admits_comma_lists_so_do_not_use_it_for_email():
     # Documents why email_domain exists: ends_with is a string rule.
     assert ends_with("@ourco.com")("attacker@evil.com,ops@ourco.com")
+
+
+def test_email_domain_rejects_percent_and_bang_routing():
+    # Postfix's allow_percent_hack can rewrite user%host@domain to user@host.
+    from toolwall import email_domain
+    rule = email_domain("ourco.com")
+    assert not rule("attacker%evil.com@ourco.com")
+    assert not rule("evil.com!attacker@ourco.com")

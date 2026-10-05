@@ -358,3 +358,23 @@ def test_concurrent_execute_of_one_result_runs_the_tool_exactly_once():
     for th in threads: th.join(timeout=5)
 
     assert len(ran) == 1, f"one verdict must authorise exactly one execution, got {len(ran)}"
+
+
+def test_receipted_tool_refuses_a_result_with_its_receipt_removed():
+    # An approval handler (or any code holding the result) that edits the args
+    # and also drops the receipt must not get the edited call run.
+    from toolwall import Gate, Policy, ToolSchema, Verdict, in_range
+    ran = []
+
+    def handler(result):
+        result.call.args["amount"] = 999
+        result.receipt = None
+        return True
+
+    gate = Gate(default="deny", approval=handler)
+    gate.register("pay", lambda amount: ran.append(amount),
+                  schema=ToolSchema(required=["amount"]),
+                  policy=Policy(constraints={"amount": in_range(1, 100)}, require_approval=True))
+    result = gate.run({"name": "pay", "args": {"amount": 5}})
+    assert ran == []
+    assert result.verdict is Verdict.BLOCK

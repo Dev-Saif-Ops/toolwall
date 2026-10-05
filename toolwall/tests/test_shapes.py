@@ -5,7 +5,10 @@ and lists. A sqlite3/psycopg fetchall() (a list of tuples), bytes, a dataclass, 
 exception message, or a secret used as a dict KEY all went through unscanned.
 """
 
+import email
+import itertools
 import sqlite3
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 
 import pytest
@@ -150,3 +153,95 @@ def test_deeply_nested_args_block_instead_of_raising():
     result = gate.run({"name": "tool", "args": {"x": deep}})
     assert result.verdict is Verdict.BLOCK
     assert not result.executed
+
+
+# --- round 2 (2026-10-05) ---------------------------------------------------
+
+
+def test_withheld_output_does_not_echo_a_secret_key_back():
+    value = {AWS_KEY: {"secret": "value " + OPENAI_KEY}}
+    for mode in ("block", "redact"):
+        result = gate_returning(value, mode=mode).run({"name": "tool", "args": {}})
+        assert AWS_KEY not in (result.error or ""), mode
+        assert all(AWS_KEY not in (f.arg or "") for f in result.findings), mode
+
+
+LAZY_SHAPES = {
+    "generator": lambda: (s for s in [f"key {AWS_KEY}"]),
+    "map": lambda: map(str, [f"key {AWS_KEY}"]),
+    "chain": lambda: itertools.chain([f"key {AWS_KEY}"]),
+    "sqlite cursor": lambda: _cursor(),
+}
+
+
+def _cursor():
+    con = sqlite3.connect(":memory:")
+    con.execute("create table t (k text)")
+    con.execute("insert into t values (?)", (f"key {AWS_KEY}",))
+    return con.execute("select k from t")
+
+
+@pytest.mark.parametrize("shape", LAZY_SHAPES)
+@pytest.mark.parametrize("mode", ["block", "redact"])
+def test_lazy_iterators_are_withheld_not_passed_through(shape, mode):
+    # str() of a generator or cursor says nothing about what it will yield.
+    result = gate_returning(LAZY_SHAPES[shape](), mode=mode).run({"name": "tool", "args": {}})
+    assert result.return_value is None, shape
+    assert "withheld" in result.error
+
+
+@pytest.mark.parametrize("mode", ["block", "redact"])
+def test_sqlite_row_factory_rows_are_scanned(mode):
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.execute("create table t (k text)")
+    con.execute("insert into t values (?)", (f"key {AWS_KEY}",))
+    rows = con.execute("select k from t").fetchall()
+    result = gate_returning(rows, mode=mode).run({"name": "tool", "args": {}})
+    shown = result.return_value
+    assert shown is None or AWS_KEY not in repr([dict(r) if hasattr(r, "keys") else r for r in shown])
+    assert result.findings or result.error
+
+
+@pytest.mark.parametrize("mode", ["block", "redact"])
+def test_email_message_body_is_scanned(mode):
+    msg = email.message_from_string(f"Subject: hi\n\nyour key is {AWS_KEY}\n")
+    result = gate_returning(msg, mode=mode).run({"name": "tool", "args": {}})
+    assert result.return_value is None or AWS_KEY not in str(result.return_value)
+
+
+def test_fresh_containers_on_access_are_not_skipped_by_id_reuse():
+    class Row:
+        def __init__(self, data):
+            self._d = data
+
+        def keys(self):
+            return list(self._d)
+
+        def __getitem__(self, k):
+            return {"v": self._d[k]}  # a new dict every access
+
+    rows = [Row({"c": "clean"}) for _ in range(50)] + [Row({"c": f"key {AWS_KEY}"})]
+    for _ in range(5):
+        result = gate_returning(rows).run({"name": "tool", "args": {}})
+        assert result.return_value is None
+
+
+def test_classes_and_modules_in_values_are_not_false_blocks():
+    import os
+    value = {"factory": dict, "kind": OrderedDict, "mod": os, "fn": len}
+    result = gate_returning(value).run({"name": "tool", "args": {}})
+    assert result.error is None
+    assert result.return_value is value
+
+
+def test_redact_keeps_dict_subclasses_and_deques():
+    od = OrderedDict(a=f"key {AWS_KEY}")
+    dd = defaultdict(list, a=[f"key {AWS_KEY}"])
+    dq = deque([f"key {AWS_KEY}"])
+    result = gate_returning({"od": od, "dd": dd, "dq": dq}, mode="redact").run({"name": "tool", "args": {}})
+    out = result.return_value
+    assert type(out["od"]) is OrderedDict
+    assert type(out["dd"]) is defaultdict and out["dd"].default_factory is list
+    assert type(out["dq"]) is deque
+    assert AWS_KEY not in repr(out)

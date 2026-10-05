@@ -84,7 +84,8 @@ Everything not explicitly allowed is blocked. That is the whole idea.
 - **Shield, both directions**: detects secrets (AWS, OpenAI, GitHub, Stripe, Slack,
   JWT, PEM, and high-entropy strings) in tool arguments *and in tool return values*,
   then blocks or redacts them, including in dict keys, tuples (database rows), sets,
-  bytes and dataclasses. Output that cannot be scanned is withheld. Reasons, reports
+  bytes and dataclasses. Output that cannot be scanned (including generators and
+  database cursors) is withheld. Reasons, reports
   and the audit log are scrubbed of detected secrets.
 - **Dry-run**: run your whole agent with `dry_run=True`: nothing executes, and
   `gate.report()` tells you what it *would* have done. `suggest_policies(gate)` drafts

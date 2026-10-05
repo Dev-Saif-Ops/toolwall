@@ -8,6 +8,7 @@ are out of detection scope by design.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import datetime as _dt
 import decimal
@@ -15,9 +16,10 @@ import enum
 import math
 import numbers
 import re
+import types
 import uuid
-from collections import Counter
-from collections.abc import Mapping
+from collections import Counter, deque
+from collections.abc import Iterator, Mapping, MutableMapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import Any, Iterator, Literal
@@ -182,19 +184,32 @@ class Shield:
                 decoded = bytes(value).decode("utf-8", "replace")
                 clean = text(decoded, path)
                 return value if clean == decoded else type(value)(clean.encode("utf-8"))
-            if _is_inert(value):
+            if _is_inert(value) or _is_code(value):
                 return value
             if id(value) in active:
                 raise ValueError(f"reference cycle at {path or 'value'}")
             active.add(id(value))
             try:
                 if isinstance(value, Mapping):
-                    return {
-                        transform(k, _key_path(path)): transform(v, _child_path(path, k))
+                    items = [
+                        (transform(k, _key_path(path)), transform(v, _child_path(path, k)))
                         for k, v in value.items()
-                    }
+                    ]
+                    if type(value) is not dict and isinstance(value, MutableMapping):
+                        # OrderedDict, defaultdict, Counter...: keep the type and its
+                        # configuration (default_factory) by refilling a shallow copy.
+                        try:
+                            rebuilt = copy.copy(value)
+                            rebuilt.clear()
+                            rebuilt.update(items)
+                            return rebuilt
+                        except Exception:
+                            pass
+                    return dict(items)
                 if isinstance(value, tuple) and hasattr(value, "_fields"):  # namedtuple
                     return type(value)(*(transform(v, f"{path}[{i}]") for i, v in enumerate(value)))
+                if isinstance(value, deque):
+                    return deque((transform(v, f"{path}[{i}]") for i, v in enumerate(value)), value.maxlen)
                 if isinstance(value, (list, tuple)):
                     return type(value)(transform(v, f"{path}[{i}]") for i, v in enumerate(value))
                 if isinstance(value, AbstractSet):
@@ -260,6 +275,23 @@ def _is_inert(value: Any) -> bool:
     return isinstance(value, _INERT)
 
 
+# Classes, modules and functions are code, not data a tool read from somewhere.
+# Walking them would wander into module globals (os.environ) and call keys() on
+# classes; neither says anything about what the tool is handing back.
+_CODE = (
+    type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType,
+    types.MethodType, types.BuiltinMethodType,
+)
+
+
+def _is_code(value: Any) -> bool:
+    return isinstance(value, _CODE)
+
+
+class UnscannableError(TypeError):
+    """A value whose content cannot be known without consuming it."""
+
+
 def _child_path(path: str, key: Any) -> str:
     return f"{path}.{key}" if path else str(key)
 
@@ -272,11 +304,17 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
     """Yield (path, text) for every piece of text reachable from value.
 
     Iterative, so nesting depth cannot raise RecursionError, and cycle-safe.
-    Covers str, bytes, mapping keys and values, list/tuple/set, dataclasses, and
-    objects with attributes; anything else is scanned through str(). A str()
-    that raises propagates, and callers treat that as fail-closed.
+    Covers str, bytes, mapping keys and values, list/tuple/set, dataclasses,
+    row-like objects and objects with attributes; anything else is scanned
+    through str(). Lazy iterators (generators, cursors, map objects) raise
+    UnscannableError: their str() says nothing about what they will yield.
+    Anything that raises propagates, and callers treat that as fail-closed.
     """
     seen: set[int] = set()
+    # Hold every visited object so its id() cannot be reused while we walk:
+    # containers built fresh on access would otherwise be freed, and a later one
+    # at the same address skipped as already seen.
+    keep: list[Any] = []
     stack: list[tuple[Any, str]] = [(value, path)]
     while stack:
         item, where = stack.pop()
@@ -286,11 +324,17 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
         if isinstance(item, (bytes, bytearray, memoryview)):
             yield where or "value", bytes(item).decode("utf-8", "replace")
             continue
-        if _is_inert(item):
+        if _is_inert(item) or _is_code(item):
             continue
         if id(item) in seen:
             continue
         seen.add(id(item))
+        keep.append(item)
+        if isinstance(item, Iterator):
+            raise UnscannableError(
+                f"{type(item).__name__} at {where or 'value'} is a lazy iterator; "
+                "materialise it (list(), fetchall()) before returning it"
+            )
         if isinstance(item, Mapping):
             for k, v in item.items():
                 stack.append((k, _key_path(where)))
@@ -298,15 +342,20 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
         elif isinstance(item, (list, tuple, AbstractSet)):
             for i, v in enumerate(item):
                 stack.append((v, f"{where}[{i}]"))
-        elif dataclasses.is_dataclass(item) and not isinstance(item, type):
+        elif dataclasses.is_dataclass(item):
             for fld in dataclasses.fields(item):
                 stack.append((getattr(item, fld.name, None), _child_path(where, fld.name)))
         elif callable(getattr(item, "keys", None)) and hasattr(item, "__getitem__"):
-            # Row-like objects (sqlite3.Row, many driver records).
+            # Row-like objects (sqlite3.Row, driver records, email messages). keys()
+            # may cover only part of the object (an email's headers, not its body),
+            # so its attributes and str() are scanned as well.
             for k in item.keys():
                 stack.append((k, _key_path(where)))
                 stack.append((item[k], _child_path(where, k)))
-        elif hasattr(item, "__dict__") and not isinstance(item, type):
+            if hasattr(item, "__dict__"):
+                stack.append((vars(item), where))
+            yield where or "value", str(item)
+        elif hasattr(item, "__dict__"):
             stack.append((vars(item), where))
             yield where or "value", str(item)
         else:

@@ -25,7 +25,7 @@ from toolwall.meter import Meter, RunEvent
 from toolwall.policy import Policy
 from toolwall.receipt import ReceiptError, fingerprint
 from toolwall.schema import ToolSchema, schema_from_signature
-from toolwall.shield import Finding, Shield, scrub_text
+from toolwall.shield import Finding, Shield, UnscannableError, scrub_text
 
 ToolFn = Callable[..., Any]
 DefaultMode = Literal["deny", "allow"]
@@ -379,6 +379,14 @@ class Gate:
 
         execute_args = result.call.args  # unreceipted opt-out runs the live args
 
+        # A receipted tool never runs without its receipt. Otherwise any code holding
+        # the result (an approval handler included) could edit the args, clear the
+        # receipt, and have the edited call run.
+        if result.receipt is None and self.registry.wants_receipt(result.call.name):
+            return self._refuse(
+                result, "no receipt bound to this result; re-check the call before running it"
+            )
+
         # The verdict was about specific arguments. If they are not the arguments we
         # are about to run, the verdict does not apply to this call. Refuse, and do
         # not spend budget on it.
@@ -463,8 +471,9 @@ class Gate:
                 except Exception as exc:
                     # Output we could not scan is output we cannot vouch for.
                     result.return_value = None
-                    result.error = (
-                        f"tool output withheld: output could not be scanned ({type(exc).__name__})"
+                    detail = str(exc) if isinstance(exc, UnscannableError) else type(exc).__name__
+                    result.error = self._scrub(
+                        f"tool output withheld: output could not be scanned ({detail})"
                     )
         if self.meter is not None:
             self.meter.record(
@@ -515,12 +524,13 @@ class Gate:
             findings = self.shield.scan_args(payload)
             if findings and self.shield.mode == "block":
                 result.return_value = None
+                where = self._scrub(f"return.{findings[0].arg}" if findings[0].arg else "return")
                 result.error = (
-                    f"tool output withheld: secret detected ({findings[0].kind}) "
-                    f"in {findings[0].arg!r}"
+                    f"tool output withheld: secret detected ({findings[0].kind}) in {where!r}"
                 )
         for f in findings:
-            f.arg = f"return.{f.arg}" if f.arg else "return"
+            # Paths are built from the output's own keys, which can be the secret.
+            f.arg = self._scrub(f"return.{f.arg}" if f.arg else "return")
         result.findings.extend(findings)
 
     def _scan_error_text(self, message: str, exc_name: str) -> str:

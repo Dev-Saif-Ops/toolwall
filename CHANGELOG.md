@@ -14,7 +14,12 @@ test that fails on 0.4.1.
   covers all of these, iteratively and cycle-safe; redaction keeps container
   types and covers keys.
 - **Output scanning failed open.** A scan that raised left the unscanned return
-  value in place. It is now withheld. A tool's exception text is scanned before
+  value in place. It is now withheld. Lazy iterators (generators, `map`, database
+  cursors) are withheld too: their `str()` says nothing about what they will
+  yield, so return materialised results (`list()`, `fetchall()`). Row-like objects
+  such as email messages are scanned through their attributes and `str()` as well
+  as `keys()`, and the walker holds every visited object so a reused `id()` cannot
+  make it skip one. A withheld output's reason no longer echoes a secret dict key. A tool's exception text is scanned before
   it reaches the model or the audit log.
 - **Secrets reached the audit log through reasons.** "unknown tool", "Unexpected
   arg", argument paths and cross-rule messages echoed model-chosen text verbatim
@@ -30,16 +35,26 @@ test that fails on 0.4.1.
   24 times. `execute()` now re-checks and reserves the slot atomically.
 - **The recommended recipient rule was bypassable.** `ends_with("@ourco.com")`
   passes `"attacker@evil.com,ops@ourco.com"`. New `email_domain()` accepts one bare
-  address on an exact domain; examples and the suite use it.
+  address on an exact domain and rejects `%`/`!` source routing; examples and the
+  suite use it.
+- **A receipted tool ran without its receipt.** Code holding a result (an approval
+  handler included) could edit the arguments, set `receipt = None`, and have the
+  edited call run. `execute()` now refuses a receipted tool's result that carries
+  no receipt.
 
 ### Changed
 - Anything that raises while checking a call (deep nesting, hostile objects) is a
-  BLOCK instead of an exception.
+  BLOCK instead of an exception. Malformed provider envelopes in `run_all` can
+  still raise; that is next.
+- Redaction keeps container types, including OrderedDict, defaultdict, Counter
+  and deque. Classes, modules and functions inside values are not walked.
+- `in_range` no longer accepts `True`/`False` as numbers. Callers passing bools
+  to a range rule will now see a block.
 - Execute-time refusals return a new BLOCK result instead of rewriting the ALLOW,
   so history never says an executed call was blocked.
 - gate-suite: 100% pass bar (was 90%), true per-call p95, overhead by argument
   size, seven new attacks and three new clean cases, and a published list of
-  known false positives. 155 to 204 tests.
+  known false positives. 155 to 222 tests.
 
 ### Docs
 - Fixed a paragraph spliced into the middle of a README sentence.
