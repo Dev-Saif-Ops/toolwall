@@ -11,6 +11,7 @@ from toolwall.meter import Meter, RunEvent, RunReport, extract_usage
 from toolwall.receipt import ReceiptError, fingerprint
 from toolwall.policy import (
     Policy,
+    email_domain,
     ends_with,
     in_range,
     matches,
@@ -45,6 +46,7 @@ __all__ = [
     "matches",
     "max_len",
     "ends_with",
+    "email_domain",
     "starts_with",
     "not_empty",
     "ToolSchema",

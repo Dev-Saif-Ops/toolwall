@@ -8,7 +8,7 @@ import datetime as dt
 from decimal import Decimal
 
 from toolwall import Gate, Meter, Policy, Shield, ToolSchema
-from toolwall.policy import ends_with, in_range, not_empty, one_of, starts_with
+from toolwall.policy import email_domain, in_range, not_empty, one_of, starts_with
 
 # Built by concatenation so repo secret-scanners never text-match the fixtures;
 # toolwall's runtime detection still catches the assembled strings.
@@ -38,7 +38,7 @@ def build_gate(approval=None, budget=None):
         "send_email",
         lambda to, subject, body: {"sent": True},
         schema=ToolSchema(required=["to", "subject", "body"], types={"to": str, "subject": str, "body": str}),
-        policy=Policy(constraints={"to": ends_with("@ourco.com")}),
+        policy=Policy(constraints={"to": email_domain("ourco.com")}),
     )
     gate.register(
         "delete_records",

@@ -98,3 +98,38 @@ def test_openai_json_nan_and_infinity_are_rejected_at_intake():
         assert result.verdict is Verdict.BLOCK, literal
         assert "intake" in result.reason
     assert ran == []
+
+
+def test_email_domain_allows_one_internal_address():
+    from toolwall import email_domain
+    rule = email_domain("ourco.com")
+    for good in ("ops@ourco.com", "first.last+tag@OURCO.com", "a_b-c@ourco.com"):
+        assert rule(good), good
+
+
+def test_email_domain_rejects_the_ends_with_bypasses():
+    from toolwall import email_domain
+    rule = email_domain("ourco.com")
+    for bad in (
+        "attacker@evil.com,ops@ourco.com",
+        "attacker@evil.com, ops@ourco.com",
+        "attacker@evil.com;ops@ourco.com",
+        "attacker@evil.com\r\nBcc: x@ourco.com",
+        "x@evil.com@ourco.com",
+        "Boss <x@evil.com> ops@ourco.com",
+        "ops@ourco.com.evil.net",
+        "ops@sub.ourco.com",
+        "ops@ourco.com.",
+        "ops@ourсo.com",            # Cyrillic 'с'
+        "@ourco.com",
+        "ops@",
+        "",
+        None,
+        ["ops@ourco.com"],
+    ):
+        assert not rule(bad), repr(bad)
+
+
+def test_ends_with_still_admits_comma_lists_so_do_not_use_it_for_email():
+    # Documents why email_domain exists: ends_with is a string rule.
+    assert ends_with("@ourco.com")("attacker@evil.com,ops@ourco.com")

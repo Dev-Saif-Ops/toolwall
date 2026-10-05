@@ -11,7 +11,7 @@ whole point is what the gate stops.
     python examples/dangerous_agent_demo.py
 """
 
-from toolwall import Gate, Meter, Policy, Shield, ToolSchema, ends_with, in_range, not_empty, one_of
+from toolwall import Gate, Meter, Policy, Shield, ToolSchema, email_domain, in_range, not_empty, one_of
 
 # --- a fake world the agent can damage ----------------------------------------
 
@@ -86,7 +86,7 @@ def build_gate():
     gate.register("send_email", send_email,
                   schema=ToolSchema(required=["to", "subject", "body"],
                                     types={"to": str, "subject": str, "body": str}),
-                  policy=Policy(constraints={"to": ends_with("@ourco.com")}))
+                  policy=Policy(constraints={"to": email_domain("ourco.com")}))
     gate.register("read_file", read_file,
                   schema=ToolSchema(required=["path"], types={"path": str}),
                   policy=Policy(cross=lambda a: "path traversal" if ".." in a["path"]

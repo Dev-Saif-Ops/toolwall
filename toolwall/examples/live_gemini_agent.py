@@ -20,7 +20,7 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 
-from toolwall import Gate, Meter, Policy, Shield, ToolSchema, ends_with, in_range, not_empty
+from toolwall import Gate, Meter, Policy, Shield, ToolSchema, email_domain, in_range, not_empty
 
 
 # --- the tools the agent is allowed to reach for ------------------------------
@@ -92,7 +92,7 @@ def build_gate() -> Gate:
     gate.register(
         "send_email", send_email,
         schema=ToolSchema(required=["to", "subject", "body"], types={"to": str, "subject": str, "body": str}),
-        policy=Policy(constraints={"to": ends_with("@ourco.com")}),   # only internal recipients
+        policy=Policy(constraints={"to": email_domain("ourco.com")}),   # only internal recipients
     )
     gate.register(
         "delete_records", delete_records,

@@ -8,7 +8,7 @@ calls get through the gate and which are stopped before they ever arrive.
     python examples/mcp_guard_demo.py
 """
 
-from toolwall import Gate, Meter, MCPGuard, Policy, Shield, ToolSchema, ends_with, in_range, not_empty
+from toolwall import Gate, Meter, MCPGuard, Policy, Shield, ToolSchema, email_domain, in_range, not_empty
 
 
 # Stand-in for the downstream MCP server. The gate decides what reaches it.
@@ -34,7 +34,7 @@ def build_guard() -> MCPGuard:
         "notify",
         lambda to, text: None,
         schema=ToolSchema(required=["to", "text"], types={"to": str, "text": str}),
-        policy=Policy(constraints={"to": ends_with("@ourco.com")}),
+        policy=Policy(constraints={"to": email_domain("ourco.com")}),
     )
     return MCPGuard(gate, forward_to_server)
 

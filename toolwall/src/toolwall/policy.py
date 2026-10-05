@@ -65,10 +65,41 @@ def max_len(limit: int) -> Rule:
 
 
 def ends_with(*suffixes: str) -> Rule:
+    """String suffix check. Not a recipient allowlist: "x@evil.com,y@ourco.com"
+    ends with "@ourco.com". Use email_domain() for email addresses."""
+
     def rule(value: Any) -> bool:
         return isinstance(value, str) and value.endswith(suffixes)
 
     return _named(f"ends_with{suffixes!r}", rule)
+
+
+_EMAIL_LOCAL = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+")
+
+
+def email_domain(*domains: str) -> Rule:
+    """Exactly one bare email address whose domain is one of `domains`.
+
+    Rejects anything a mail API could read as more than one recipient or as an
+    extra header: commas, semicolons, angle brackets, whitespace, CR/LF, a second
+    "@". Domains match exactly, case-insensitively; subdomains are not included
+    (list them explicitly). Non-ASCII lookalikes never equal an ASCII domain.
+    """
+    allowed = {d.strip().lstrip("@").lower() for d in domains}
+    if not allowed or "" in allowed:
+        raise ValueError("email_domain needs at least one non-empty domain")
+
+    def rule(value: Any) -> bool:
+        if not isinstance(value, str) or value.count("@") != 1:
+            return False
+        local, domain = value.split("@")
+        return (
+            _EMAIL_LOCAL.fullmatch(local) is not None
+            and domain.isascii()
+            and domain.lower() in allowed
+        )
+
+    return _named(f"email_domain{tuple(sorted(allowed))!r}", rule)
 
 
 def starts_with(*prefixes: str) -> Rule:

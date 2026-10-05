@@ -22,7 +22,7 @@ from toolwall import (
     Shield,
     ToolSchema,
     Verdict,
-    ends_with,
+    email_domain,
     in_range,
     not_empty,
 )
@@ -55,7 +55,7 @@ def build_gate(shield_mode="block"):
                   policy=Policy(constraints={"limit": in_range(1, 100)}))
     gate.register("send_email", counted("send_email"),
                   schema=ToolSchema(required=["to", "body"], types={"to": str, "body": str}),
-                  policy=Policy(constraints={"to": ends_with("@ourco.com")}))
+                  policy=Policy(constraints={"to": email_domain("ourco.com")}))
     gate.register("delete_records", counted("delete_records"),
                   schema=ToolSchema(required=["filter"], types={"filter": dict}),
                   policy=Policy(constraints={"filter": not_empty}, require_approval=True))
