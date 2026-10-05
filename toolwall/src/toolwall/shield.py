@@ -226,6 +226,29 @@ class Shield:
         return f"[REDACTED:{kind}-{self._counts[kind]}]"
 
 
+_scrubber: "Shield | None" = None
+
+
+def scrub_text(text: Any, shield: "Shield | None" = None) -> Any:
+    """Replace secret-shaped spans with [REDACTED:kind]. Keeps no vault.
+
+    For text the gate itself writes (reasons, audit fields, reports), which can
+    echo model-chosen tool names and argument keys. Always runs the default
+    patterns, plus the caller's shield when one is attached, so a shield built
+    with narrower patterns cannot reopen the audit log.
+    """
+    global _scrubber
+    if not isinstance(text, str) or not text:
+        return text
+    if _scrubber is None:
+        _scrubber = Shield(mode="block")
+    out = text
+    for sh in (_scrubber, shield) if shield is not None and shield is not _scrubber else (_scrubber,):
+        for f in reversed(sh.scan(out)):
+            out = out[: f.start] + f"[REDACTED:{f.kind}]" + out[f.end :]
+    return out
+
+
 # Values that cannot carry free text from the model or a data source.
 _INERT = (
     numbers.Number, decimal.Decimal, _dt.date, _dt.time, _dt.timedelta, uuid.UUID,

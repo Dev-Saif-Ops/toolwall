@@ -25,7 +25,7 @@ from toolwall.meter import Meter, RunEvent
 from toolwall.policy import Policy
 from toolwall.receipt import ReceiptError, fingerprint
 from toolwall.schema import ToolSchema, schema_from_signature
-from toolwall.shield import Finding, Shield
+from toolwall.shield import Finding, Shield, scrub_text
 
 ToolFn = Callable[..., Any]
 DefaultMode = Literal["deny", "allow"]
@@ -457,8 +457,8 @@ class Gate:
                     lane=self.lane,
                     kind="tool",
                     ok=result.executed,
-                    namespace=result.call.name,
-                    error=result.error,
+                    namespace=self._scrub(result.call.name),
+                    error=self._scrub(result.error),
                 )
             )
         return result
@@ -563,7 +563,7 @@ class Gate:
         finding_kinds: dict[str, int] = {}
         for r in self.history:
             by_verdict[r.verdict.value] = by_verdict.get(r.verdict.value, 0) + 1
-            name = r.call.name if r.call else "(unparsed)"
+            name = self._scrub(r.call.name) if r.call else "(unparsed)"
             tool_row = by_tool.setdefault(name, {"allow": 0, "block": 0, "needs_approval": 0})
             tool_row[r.verdict.value] = tool_row.get(r.verdict.value, 0) + 1
             if r.verdict is Verdict.BLOCK and r.reasons:
@@ -582,13 +582,21 @@ class Gate:
 
     # -- internals -------------------------------------------------------------------
 
+    def _scrub(self, text: Any) -> Any:
+        return scrub_text(text, self.shield)
+
     def _record(self, result: GateResult) -> GateResult:
+        # Reasons echo model-chosen tool names, arg keys and cross-rule text. They go
+        # back to the model, into reports and into the audit log: scrub them once here.
+        result.reasons = [self._scrub(r) for r in result.reasons]
+        for f in result.findings:
+            f.arg = self._scrub(f.arg)
         self.history.append(result)
         if self.meter is not None:
             self.meter.record_intercept(
                 lane=self.lane,
                 ok=result.verdict is Verdict.ALLOW,
-                namespace=result.call.name if result.call else None,
+                namespace=self._scrub(result.call.name) if result.call else None,
                 error="; ".join(result.reasons) or None,
                 meta={
                     "verdict": result.verdict.value,
@@ -605,7 +613,7 @@ class Gate:
                     lane=self.lane,
                     kind="note",
                     ok=result.verdict is Verdict.ALLOW,
-                    namespace=result.call.name if result.call else None,
+                    namespace=self._scrub(result.call.name) if result.call else None,
                     meta={"approval": event},
                 )
             )
