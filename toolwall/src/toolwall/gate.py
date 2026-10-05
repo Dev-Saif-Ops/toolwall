@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import threading
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -170,10 +171,12 @@ class Gate:
         self._budget: dict[str, Any] = {}
         self._executed_calls = 0
         self._executed_per_tool: dict[str, int] = {}
-        # Results this gate issued and has not run yet: id -> (result, tool name,
-        # receipt) as they stood at check time. execute() trusts this, not the
-        # mutable fields on the result, and an entry is spent when it is used.
-        self._issued: dict[int, tuple[GateResult, str, str | None]] = {}
+        # Results this gate issued and has not run yet: id -> [weakref to result,
+        # tool name, receipt, runnable]. execute() trusts this, not the mutable
+        # fields on the result. An entry is spent when used, dropped when an approval
+        # is denied, and freed with its result (weak reference), so clearing history
+        # releases it.
+        self._issued: dict[int, list[Any]] = {}
 
     def register(
         self,
@@ -387,13 +390,14 @@ class Gate:
         # already used, does not run.
         with self._lock:
             issued = self._issued.pop(id(result), None)
-        if issued is None or issued[0] is not result:
+        if issued is None or issued[0]() is not result or not issued[3]:
             return self._refuse(
                 result,
-                "receipt already spent, or this result was not issued by this gate; "
-                "re-check the call instead of replaying an approved result",
+                "receipt already spent, or this result was not issued by this gate as "
+                "runnable (a held call needs a granted approval); re-check the call "
+                "instead of replaying an approved result",
             )
-        _, checked_name, receipt = issued
+        _, checked_name, receipt, _ = issued
 
         # Code holding the result (an approval handler included) can edit it. The
         # tool, and for receipted tools the arguments, must be what was checked.
@@ -522,11 +526,14 @@ class Gate:
         value = result.return_value
         if value is None:
             return
-        payload = value if isinstance(value, dict) else {"return_value": value}
+        # A plain dict is scanned as-is so finding paths read return.<key>; anything
+        # else (a dict subclass included) is wrapped so redaction can rebuild its type.
+        plain = type(value) is dict
+        payload = value if plain else {"return_value": value}
         if self.shield.mode == "redact":
             cleaned, findings = self.shield.redact_args(payload)
             if findings:
-                result.return_value = cleaned if isinstance(value, dict) else cleaned["return_value"]
+                result.return_value = cleaned if plain else cleaned["return_value"]
         else:
             findings = self.shield.scan_args(payload)
             if findings and self.shield.mode == "block":
@@ -558,17 +565,25 @@ class Gate:
     def _resolve_approval(self, result: GateResult) -> GateResult:
         """Called by run/run_all on NEEDS_APPROVAL. Fail closed without a handler."""
         if self.approval is None:
+            # Held for good: there is no approve-later path, so nothing may run it.
+            self._issued.pop(id(result), None)
             return result
         try:
             granted = bool(self.approval(result))
         except Exception as exc:
+            self._issued.pop(id(result), None)
             result.verdict = Verdict.BLOCK
             result.reasons.append(f"approval handler raised {type(exc).__name__}: fails closed")
             return self._record_transition(result, "approval-error")
         if granted:
+            with self._lock:
+                entry = self._issued.get(id(result))
+                if entry is not None and entry[0]() is result:
+                    entry[3] = True  # the only way a held call becomes runnable
             result.verdict = Verdict.ALLOW
             result.reasons = []
             return self._record_transition(result, "approval-granted")
+        self._issued.pop(id(result), None)
         result.verdict = Verdict.BLOCK
         result.reasons.append("approval denied")
         return self._record_transition(result, "approval-denied")
@@ -632,10 +647,23 @@ class Gate:
     def _scrub(self, text: Any) -> Any:
         return scrub_text(text, self.shield)
 
+    def _issue(self, result: GateResult) -> None:
+        key = id(result)
+
+        def forget(ref: "weakref.ref[GateResult]", key: int = key) -> None:
+            # No lock: this can run from the garbage collector at any point, and
+            # dict operations are atomic. Only drop the entry if it is still ours.
+            entry = self._issued.get(key)
+            if entry is not None and entry[0] is ref:
+                self._issued.pop(key, None)
+
+        runnable = result.verdict is Verdict.ALLOW  # held calls need a granted approval
+        with self._lock:
+            self._issued[key] = [weakref.ref(result, forget), result.call.name, result.receipt, runnable]
+
     def _record(self, result: GateResult) -> GateResult:
         if result.call is not None and result.verdict in (Verdict.ALLOW, Verdict.NEEDS_APPROVAL):
-            with self._lock:
-                self._issued[id(result)] = (result, result.call.name, result.receipt)
+            self._issue(result)
         # Reasons echo model-chosen tool names, arg keys and cross-rule text. They go
         # back to the model, into reports and into the audit log: scrub them once here.
         result.reasons = [self._scrub(r) for r in result.reasons]

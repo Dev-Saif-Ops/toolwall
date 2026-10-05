@@ -8,13 +8,16 @@ are out of detection scope by design.
 
 from __future__ import annotations
 
+import array
 import dataclasses
 import datetime as _dt
 import decimal
 import enum
 import math
 import numbers
+import email.message
 import re
+import sqlite3
 import types
 import uuid
 from collections import Counter, OrderedDict, defaultdict, deque
@@ -317,9 +320,25 @@ def _unscannable(item: Any) -> UnscannableError:
     # The type name only: the path is built from the output's own keys, which
     # should not reach the reason or the audit log.
     return UnscannableError(
-        f"{type(item).__name__} is lazy: what it yields cannot be scanned without "
-        "consuming it; materialise it (list(), fetchall()) before returning it"
+        f"{type(item).__name__} is not plain data the shield can scan; return "
+        "materialised plain data (list(), fetchall(), model_dump(), tolist())"
     )
+
+
+def _iterable(item: Any) -> bool:
+    # iter(), not hasattr(__iter__): the old sequence protocol (__getitem__ alone,
+    # as on xml.etree.ElementTree.Element) is iterable too.
+    try:
+        iter(item)
+    except TypeError:
+        return False
+    return True
+
+
+# Row types whose keys()/__getitem__ plus attributes plus str() cover everything
+# they hold. Other objects with keys() that are also iterable (an XML Element:
+# keys() lists attributes, iteration yields children) are not trusted as rows.
+_KNOWN_ROWS = (sqlite3.Row, email.message.Message)
 
 
 def _child_path(path: str, key: Any) -> str:
@@ -366,6 +385,11 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
         keep.append(item)
         if isinstance(item, Iterator):
             raise _unscannable(item)
+        if isinstance(item, array.array):
+            # Element-wise each entry is one char or one int; scan the text it holds.
+            text = item.tounicode() if item.typecode == "u" else item.tobytes().decode("utf-8", "replace")
+            yield where or "value", text
+            continue
         if isinstance(item, Mapping):
             for k, v in item.items():
                 stack.append((k, _key_path(where)))
@@ -377,7 +401,11 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
         elif dataclasses.is_dataclass(item):
             for fld in dataclasses.fields(item):
                 stack.append((getattr(item, fld.name, None), _child_path(where, fld.name)))
-        elif callable(getattr(item, "keys", None)) and hasattr(item, "__getitem__"):
+        elif (
+            callable(getattr(item, "keys", None))
+            and hasattr(item, "__getitem__")
+            and (isinstance(item, _KNOWN_ROWS) or not _iterable(item))
+        ):
             # Row-like objects (sqlite3.Row, driver records, email messages). keys()
             # may cover only part of the object (an email's headers, not its body),
             # so its attributes and str() are scanned as well.
@@ -387,7 +415,7 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
             if hasattr(item, "__dict__"):
                 stack.append((vars(item), where))
             yield where or "value", str(item)
-        elif hasattr(item, "__iter__"):
+        elif _iterable(item):
             raise _unscannable(item)
         elif hasattr(item, "__dict__"):
             stack.append((vars(item), where))

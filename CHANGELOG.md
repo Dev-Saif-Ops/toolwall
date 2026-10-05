@@ -17,8 +17,11 @@ test that fails on 0.4.1.
   value in place. It is now withheld. Lazy iterables (generators, `map`, database
   cursors, file objects, ORM query sets: anything iterable that is not a plain
   container) are withheld too, because their `str()` says nothing about what they
-  will yield. **Rule of thumb: return plain, materialised data** (dicts, lists,
-  tuples, `fetchall()` rows). Row-like objects such as email messages are scanned
+  will yield. So are other iterable objects the shield cannot read whole: an XML
+  `Element` (its `keys()` lists attributes, not text), pydantic models, numpy
+  arrays. **Rule of thumb: return plain, materialised data** (dicts, lists,
+  tuples, `fetchall()` rows, `model_dump()`, `tolist()`). The output shield is
+  defence in depth for that plain data, not a scanner for arbitrary objects. Row-like objects such as email messages are scanned
   through their attributes and `str()` as well as `keys()`; classes and functions
   are scanned through `str()` (a forgotten `()` returns a bound method that prints
   its record). The walker holds every visited object so a reused `id()` cannot make
@@ -51,8 +54,11 @@ test that fails on 0.4.1.
   `GateResult(ALLOW, ...)` also ran. The gate now keeps its own record of every
   result it issues (tool name and receipt at check time). `execute()` runs only a
   result it issued, only once, only for the tool that was checked, and checks the
-  arguments against the recorded receipt. Single use now covers `receipt=False`
-  tools too (their replay was a documented limitation).
+  arguments against the recorded receipt. A held call becomes runnable only
+  through a granted approval, so flipping `result.verdict` on a held or denied
+  result does nothing. Single use now covers `receipt=False` tools too (their
+  replay was a documented limitation). Records are weakly held and freed with
+  their results.
 
 ### Changed
 - Anything that raises while checking a call (deep nesting, hostile objects) is a
@@ -66,7 +72,7 @@ test that fails on 0.4.1.
   so history never says an executed call was blocked.
 - gate-suite: 100% pass bar (was 90%), true per-call p95, overhead by argument
   size, seven new attacks and three new clean cases, and a published list of
-  known false positives. 155 to 236 tests.
+  known false positives. 155 to 245 tests.
 
 ### Docs
 - Fixed a paragraph spliced into the middle of a README sentence.

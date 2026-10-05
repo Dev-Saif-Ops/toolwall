@@ -381,3 +381,43 @@ def test_unscannable_reason_does_not_carry_output_keys():
     result = gate_returning(value).run({"name": "tool", "args": {}})
     assert result.return_value is None
     assert "customer-acme" not in result.error
+
+
+# --- round 4 (2026-10-05) ---------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["block", "redact"])
+def test_xml_element_text_does_not_pass_the_shield(mode):
+    # Element.keys() lists attributes only; text and children live elsewhere.
+    import xml.etree.ElementTree as ET
+    for el in (ET.fromstring(f"<a><b>key {AWS_KEY}</b></a>"), ET.fromstring(f"<a>key {AWS_KEY}</a>")):
+        result = gate_returning(el, mode=mode).run({"name": "tool", "args": {}})
+        shown = result.return_value
+        assert shown is None or AWS_KEY not in (ET.tostring(shown, encoding="unicode") if hasattr(shown, "tag") else str(shown))
+
+
+@pytest.mark.parametrize("mode", ["block", "redact"])
+def test_array_array_text_is_scanned(mode):
+    from array import array
+    for arr in (array("u", f"key {AWS_KEY}"), array("B", f"key {AWS_KEY}".encode())):
+        result = gate_returning(arr, mode=mode).run({"name": "tool", "args": {}})
+        assert result.return_value is None or AWS_KEY not in repr(result.return_value)
+        assert result.findings or result.error
+
+
+def test_counter_holding_a_secret_key_keeps_its_type_and_counts():
+    value = Counter({f"key {AWS_KEY}": 2, "apple": 3})
+    result = gate_returning(value, mode="redact").run({"name": "tool", "args": {}})
+    assert type(result.return_value) is Counter
+    assert result.return_value["apple"] == 3
+    assert AWS_KEY not in repr(result.return_value)
+
+
+def test_unscannable_message_does_not_call_everything_lazy():
+    class Model:
+        def __iter__(self):
+            return iter([("name", "x")])
+
+    result = gate_returning(Model()).run({"name": "tool", "args": {}})
+    assert result.return_value is None
+    assert "plain data" in result.error

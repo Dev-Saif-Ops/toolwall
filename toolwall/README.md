@@ -85,8 +85,8 @@ Everything not explicitly allowed is blocked. That is the whole idea.
   JWT, PEM, and high-entropy strings) in tool arguments *and in tool return values*,
   then blocks or redacts them, including in dict keys, tuples (database rows), sets,
   bytes and dataclasses. Output that cannot be scanned (generators, cursors, file
-  objects) is withheld, so return plain data; redaction never modifies the tool's
-  own objects. Reasons, reports
+  objects, XML elements, models, arrays) is withheld, so return plain data;
+  redaction never modifies the tool's own objects. Reasons, reports
   and the audit log are scrubbed of detected secrets.
 - **Dry-run**: run your whole agent with `dry_run=True`: nothing executes, and
   `gate.report()` tells you what it *would* have done. `suggest_policies(gate)` drafts
