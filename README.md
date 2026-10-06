@@ -114,7 +114,8 @@ shield is known to flag is listed in the report too
 The suite is a regression suite for one reference config, not a measure of coverage
 against attacks nobody has written yet. Secret detection is pattern + entropy based and
 is never 100%; the report states exactly what is and is not proven.
-**Try to break it. Issues and PRs welcome.**
+**Try to break it.** Found a bypass? Report it privately, see [SECURITY.md](SECURITY.md).
+False blocks, crashes and suite ideas are welcome as issues and PRs.
 
 **The verdict covers the call, not the state of the world.** An approved
 `delete_records(id=42)` deletes whatever 42 points to at execution time; if the

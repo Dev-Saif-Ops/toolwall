@@ -166,6 +166,12 @@ changed. Argument integrity is not resource integrity. For resources that can ch
 owner or meaning, re-verify inside the tool's own transaction (for example
 compare-and-swap on a version column); the gate cannot see your datastore.
 
+## Security
+
+Found a way past the gate? Please report it privately through
+[GitHub's vulnerability reporting](https://github.com/Dev-Saif-Ops/toolwall/security/advisories/new),
+not as a public issue. Details in [SECURITY.md](https://github.com/Dev-Saif-Ops/toolwall/blob/main/SECURITY.md).
+
 ## Links
 
 - **Source, full docs, and the failure suite:** https://github.com/Dev-Saif-Ops/toolwall

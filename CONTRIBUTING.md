@@ -83,9 +83,8 @@ is licensed under MIT.
 
 ## Security issues
 
-toolwall is pre-1.0 with no known production deployments, so a public issue is
-usually the right call and is faster for everyone.
-
-If you believe a finding would put someone at real risk if disclosed publicly,
-use GitHub's private vulnerability reporting on this repository (Security tab)
-rather than opening a public issue.
+A bypass (a call or secret that gets through the documented configuration, or
+the gate failing open) is reported privately, not as an issue. See
+[SECURITY.md](SECURITY.md) for how, what counts, and what happens next. False
+blocks, crashes where nothing executes, and new suite ideas are fine as public
+issues.
