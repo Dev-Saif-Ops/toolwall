@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.6.0] - unreleased
+## [0.6.0] - 2026-10-30
 
 ToolWall plugs into the agent frameworks that run tools themselves. Same wall,
 same rules; the framework keeps running the tool.
@@ -30,6 +30,7 @@ same rules; the framework keeps running the tool.
   framework installed (and the MCP adapter on mcp 1.x) and fails if any test is
   skipped. The OpenAI, LangChain and MCP tests run the framework's real agent
   loop or server; the Claude tests call the hooks with the input the SDK sends.
+- 498 to 559 tests.
 
 ### Known limits
 - OpenAI Agents SDK: annotate numbers `int | float`, not `float`. When the SDK's

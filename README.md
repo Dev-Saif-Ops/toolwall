@@ -12,7 +12,7 @@
 > Your support agent can call `issue_refund()`. toolwall decides how much, for which
 > customer, and when a person has to approve, before the call runs.
 
-**Status: v0.5.0 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 498 tests in CI on Python 3.10–3.13 · published attack suite · zero dependencies.**
+**Status: v0.6.0 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 559 tests in CI on Python 3.10–3.13 · published attack suite · zero dependencies.**
 
 ```bash
 pip install toolwall
@@ -357,7 +357,7 @@ Run the tests and the published attack suite yourself:
 
 ```bash
 cd toolwall && pip install -e ".[dev]"
-pytest                                    # 498 tests
+pytest                                    # 508 tests (559 with ".[dev,integrations]")
 python ../gate-suite/run_suite.py         # 35/35 attacks blocked, prints the G1 report
 ```
 

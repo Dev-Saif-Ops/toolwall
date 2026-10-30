@@ -145,7 +145,16 @@ scan, so a handoff that carries the history works even after a reasoning-model
 turn. The id slots of a message (its id, tool call ids, response metadata) are
 checked for known secret patterns only, because provider ids look random. If a
 secret is found in what the tool adds, the whole Command is withheld and the
-model gets an error message instead.
+model gets an error message instead (in the shield's warn mode it is only
+logged). ToolMessages in the update are always scanned, even ones already in
+state.
+
+Two consequences to know. History already in state is not scanned, so text a
+user typed or the model wrote earlier is handed to the next agent as is (tool
+output in that history was scanned when it arrived). And a tool that runs a
+sub-agent and returns that sub-agent's brand-new messages may be withheld when
+they carry reasoning blobs or provider ids outside the id slots: safe, but the
+handoff doesn't happen.
 
 ## MCP servers (official Python SDK, 1.x and 2.x)
 
@@ -201,5 +210,8 @@ if decision.needs_approval and person_says_yes():
   blocked.
 - `wall.context(...)` is a contextvar. LangGraph and the SDKs above carry it into
   their tool threads. Your own thread pools need `contextvars.copy_context()`.
+- The wall sees what a tool returns, not what its code writes elsewhere. A tool
+  that changes the agent's state in place (or writes to a database) is outside
+  what an output check can see.
 - Approvals happen in memory, inside one run. Approval tickets that survive a
   restart are planned for 0.7.

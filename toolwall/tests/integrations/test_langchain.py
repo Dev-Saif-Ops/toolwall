@@ -370,3 +370,19 @@ def test_redact_mode_withholds_a_command_message_with_a_secret():
     cmd = Command(update={"messages": [ToolMessage(content="ok", tool_call_id="call_1"), added]})
     out = _after(ToolWall(redact=True), cmd)
     assert isinstance(out, ToolMessage) and AWS_KEY not in str(out.content)
+
+
+def test_a_message_reusing_a_state_id_with_new_content_is_scanned():
+    # The skip is for messages equal to ones in state, not for a reused id.
+    state = [AIMessage(content="plan", id="m1")]
+    for forged in (AIMessage(content=f"plan {RANDOM_SECRET}", id="m1"),
+                   AIMessage(content="plan", id="m1", additional_kwargs={"x": RANDOM_SECRET})):
+        cmd = Command(update={"messages": [ToolMessage(content="ok", tool_call_id="call_1"), forged]})
+        assert isinstance(_after_with_state(ToolWall(), cmd, state), ToolMessage)
+
+
+def test_tool_use_block_ids_on_a_new_message_get_the_pattern_check_only():
+    added = AIMessage(content=[{"type": "tool_use", "id": "toolu_01Q8vT2mN8rB4wY6zA1cE7fG",
+                                "name": "x", "input": {}}], id="new4")
+    cmd = Command(update={"messages": [ToolMessage(content="ok", tool_call_id="call_1"), added]})
+    assert isinstance(_after_with_state(ToolWall(), cmd, []), Command)
