@@ -14,6 +14,7 @@ Check order (first failure blocks, fail-closed):
 from __future__ import annotations
 
 import copy
+import inspect
 import threading
 import weakref
 from collections.abc import Callable
@@ -21,6 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
+from toolwall._aio import discard_awaitable, is_async_callable
 from toolwall.intake import IntakeError, ToolCall, parse_tool_calls
 from toolwall.meter import Meter, RunEvent
 from toolwall.policy import Policy
@@ -379,7 +381,61 @@ class Gate:
         the registered tool being called with them (MCPGuard forwards to a
         downstream server this way). Everything else applies unchanged; the tool
         must still be registered, because registration is the allowlist.
+
+        Synchronous. An async tool is refused here, before any budget is spent, and
+        an awaitable returned by a sync callable is withheld: neither has run, and
+        neither has an output the shield could scan. Use aexecute()/arun() for them.
         """
+        admitted = self._admit(result, invoke, sync=True)
+        if isinstance(admitted, GateResult):
+            return admitted
+        target, args = admitted
+        try:
+            value = target(args)
+        except Exception as exc:
+            result.error = self._scan_error_text(f"{type(exc).__name__}: {exc}", type(exc).__name__)
+        else:
+            if inspect.isawaitable(value):
+                discard_awaitable(value)
+                result.error = (
+                    "tool returned an awaitable that was not awaited, so it did not run; "
+                    "call it with acall() / arun()"
+                )
+            else:
+                self._accept_output(result, value)
+        return self._record_tool(result, invoke)
+
+    async def aexecute(
+        self, result: GateResult, invoke: Callable[[dict[str, Any]], Any] | None = None
+    ) -> GateResult:
+        """execute() for async tools and forwards: awaits, then scans the output.
+
+        Every check is shared with execute(); only the call itself differs. Sync
+        tools run inline (not in a thread), exactly as they do in execute().
+        """
+        admitted = self._admit(result, invoke, sync=False)
+        if isinstance(admitted, GateResult):
+            return admitted
+        target, args = admitted
+        try:
+            value = target(args)
+            if inspect.isawaitable(value):
+                value = await value
+        except Exception as exc:
+            result.error = self._scan_error_text(f"{type(exc).__name__}: {exc}", type(exc).__name__)
+        else:
+            if inspect.isawaitable(value):  # an awaitable that resolved to another one
+                discard_awaitable(value)
+                result.error = "tool output withheld: output could not be scanned (awaitable)"
+            else:
+                self._accept_output(result, value)
+        return self._record_tool(result, invoke)
+
+    def _admit(
+        self, result: GateResult, invoke: Callable[[dict[str, Any]], Any] | None, *, sync: bool
+    ) -> GateResult | tuple[Callable[[dict[str, Any]], Any], dict[str, Any]]:
+        """Every check between an ALLOW and the call. Returns the call to make, or
+        the final result when the call must not happen (refused, dry run)."""
         if not result.allowed or result.call is None:
             joined = "; ".join(result.reasons) or "no call"
             raise PermissionError(f"refusing to execute a {result.verdict.value} result: {joined}")
@@ -438,6 +494,16 @@ class Gate:
             # result keeps the checked args; the hash just proved the two identical.
             execute_args = frozen_args
 
+        tool = self.registry.get(result.call.name)
+        # Calling an async tool synchronously only creates a coroutine: the tool would
+        # not run and its output could not be scanned. Refuse before spending budget.
+        if sync and invoke is None and tool is not None and is_async_callable(tool):
+            return self._refuse(
+                result,
+                f"{result.call.name!r} is an async tool; call it with acall() / arun() "
+                "so it is awaited and its output scanned",
+            )
+
         # Re-check the budget and reserve the slot in one critical section. The check
         # in check() is advisory: between it and here other threads sharing this Gate
         # may have executed, and without this a burst of parallel calls all pass a
@@ -464,28 +530,29 @@ class Gate:
                     )
                 )
             return result
-        tool = self.registry.get(result.call.name)
         if tool is None:  # registry mutated between check and execute
             result.error = f"unknown tool at execute time: {result.call.name!r}"
-        else:
-            try:
-                if invoke is not None:
-                    result.return_value = invoke(execute_args)
-                else:
-                    result.return_value = tool(**execute_args)
-                result.executed = True
-            except Exception as exc:
-                result.error = self._scan_error_text(f"{type(exc).__name__}: {exc}", type(exc).__name__)
-            else:
-                try:
-                    self._scan_output(result)
-                except Exception as exc:
-                    # Output we could not scan is output we cannot vouch for.
-                    result.return_value = None
-                    detail = str(exc) if isinstance(exc, UnscannableError) else type(exc).__name__
-                    result.error = self._scrub(
-                        f"tool output withheld: output could not be scanned ({detail})"
-                    )
+            return self._record_tool(result, invoke)
+        if invoke is not None:
+            return invoke, execute_args
+        return (lambda args: tool(**args)), execute_args
+
+    def _accept_output(self, result: GateResult, value: Any) -> None:
+        result.return_value = value
+        result.executed = True
+        try:
+            self._scan_output(result)
+        except Exception as exc:
+            # Output we could not scan is output we cannot vouch for.
+            result.return_value = None
+            detail = str(exc) if isinstance(exc, UnscannableError) else type(exc).__name__
+            result.error = self._scrub(
+                f"tool output withheld: output could not be scanned ({detail})"
+            )
+
+    def _record_tool(
+        self, result: GateResult, invoke: Callable[[dict[str, Any]], Any] | None
+    ) -> GateResult:
         if self.meter is not None:
             self.meter.record(
                 RunEvent(
@@ -563,18 +630,51 @@ class Gate:
         return message
 
     def _resolve_approval(self, result: GateResult) -> GateResult:
-        """Called by run/run_all on NEEDS_APPROVAL. Fail closed without a handler."""
+        """Called by run/run_all on NEEDS_APPROVAL. Fail closed without a handler.
+
+        An async handler cannot be asked from here: its coroutine is truthy, and
+        reading it as "granted" would approve every call. It is refused, closed.
+        """
         if self.approval is None:
-            # Held for good: there is no approve-later path, so nothing may run it.
-            self._issued.pop(id(result), None)
-            return result
+            return self._approval_unavailable(result)
         try:
-            granted = bool(self.approval(result))
+            granted = self.approval(result)
         except Exception as exc:
-            self._issued.pop(id(result), None)
-            result.verdict = Verdict.BLOCK
-            result.reasons.append(f"approval handler raised {type(exc).__name__}: fails closed")
-            return self._record_transition(result, "approval-error")
+            return self._approval_failed(result, f"approval handler raised {type(exc).__name__}: fails closed")
+        if inspect.isawaitable(granted):
+            discard_awaitable(granted)
+            return self._approval_failed(
+                result, "approval handler is async; use acall() / arun() so it is awaited: fails closed"
+            )
+        return self._approval_decided(result, bool(granted))
+
+    async def _aresolve_approval(self, result: GateResult) -> GateResult:
+        """_resolve_approval() for the async path: an async handler is awaited."""
+        if self.approval is None:
+            return self._approval_unavailable(result)
+        try:
+            granted = self.approval(result)
+            if inspect.isawaitable(granted):
+                granted = await granted
+        except Exception as exc:
+            return self._approval_failed(result, f"approval handler raised {type(exc).__name__}: fails closed")
+        if inspect.isawaitable(granted):
+            discard_awaitable(granted)
+            return self._approval_failed(result, "approval handler returned an awaitable: fails closed")
+        return self._approval_decided(result, bool(granted))
+
+    def _approval_unavailable(self, result: GateResult) -> GateResult:
+        # Held for good: there is no approve-later path, so nothing may run it.
+        self._issued.pop(id(result), None)
+        return result
+
+    def _approval_failed(self, result: GateResult, reason: str) -> GateResult:
+        self._issued.pop(id(result), None)
+        result.verdict = Verdict.BLOCK
+        result.reasons.append(reason)
+        return self._record_transition(result, "approval-error")
+
+    def _approval_decided(self, result: GateResult, granted: bool) -> GateResult:
         if granted:
             with self._lock:
                 entry = self._issued.get(id(result))
@@ -613,6 +713,32 @@ class Gate:
             if result.verdict is Verdict.NEEDS_APPROVAL:
                 result = self._resolve_approval(result)
             out.append(self.execute(result) if result.allowed else result)
+        return out
+
+    async def arun(self, payload: Any) -> GateResult:
+        """run() for async tools and async approval handlers."""
+        result = self.check(payload)
+        if result.verdict is Verdict.NEEDS_APPROVAL:
+            result = await self._aresolve_approval(result)
+        if result.allowed:
+            return await self.aexecute(result)
+        return result
+
+    async def arun_all(self, payload: Any) -> list[GateResult]:
+        """run_all() for async tools: calls run one after another, never at once,
+        so each check sees the budget the previous call spent."""
+        try:
+            calls = parse_tool_calls(payload)
+        except IntakeError as exc:
+            return [self._record(GateResult(Verdict.BLOCK, reasons=[f"intake: {exc}"]))]
+        if not calls:
+            return [self._record(GateResult(Verdict.BLOCK, reasons=["intake: no tool calls in payload"]))]
+        out: list[GateResult] = []
+        for call in calls:
+            result = self._check_one(call)
+            if result.verdict is Verdict.NEEDS_APPROVAL:
+                result = await self._aresolve_approval(result)
+            out.append(await self.aexecute(result) if result.allowed else result)
         return out
 
     # -- reporting ----------------------------------------------------------------

@@ -6,11 +6,14 @@ Rules are plain callables returning truthy/falsy. A raising rule fails closed.
 
 from __future__ import annotations
 
+import inspect
 import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+from toolwall._aio import discard_awaitable
 
 Rule = Callable[[Any], bool]
 CrossRule = Callable[[dict[str, Any]], "str | list[str] | None"]
@@ -136,7 +139,13 @@ class Policy:
                 continue
             name = getattr(rule, "__name__", "rule")
             try:
-                ok = bool(rule(args[key]))
+                verdict = rule(args[key])
+                if inspect.isawaitable(verdict):
+                    # A coroutine is truthy: reading it would pass every value.
+                    discard_awaitable(verdict)
+                    errors.append(f"policy rule {name} for arg {key!r} is async; rules must be synchronous: fails closed")
+                    continue
+                ok = bool(verdict)
             except Exception as exc:
                 errors.append(
                     f"policy rule {name} for arg {key!r} raised {type(exc).__name__}: fails closed"
@@ -150,6 +159,10 @@ class Policy:
             except Exception as exc:
                 errors.append(f"policy cross-rule raised {type(exc).__name__}: fails closed")
             else:
+                if inspect.isawaitable(verdict):
+                    discard_awaitable(verdict)
+                    errors.append("policy cross-rule is async; rules must be synchronous: fails closed")
+                    return errors
                 if isinstance(verdict, str):
                     errors.append(verdict)
                 elif verdict:

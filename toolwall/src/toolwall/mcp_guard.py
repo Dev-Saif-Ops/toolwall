@@ -13,6 +13,7 @@ module imports it lazily so toolwall core stays stdlib-only. The logic below
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 from typing import Any, Callable
 
 from toolwall.gate import Gate, GateResult, Verdict
@@ -55,6 +56,8 @@ class MCPGuard:
         self.forward = forward
 
     def handle(self, name: str, args: dict[str, Any]) -> GuardedCall:
+        """Check and forward synchronously. An async `forward` is refused here
+        (its coroutine would never run); use ahandle() for it."""
         result = self.gate.check({"name": name, "args": args})
 
         if result.verdict is Verdict.NEEDS_APPROVAL:
@@ -70,26 +73,48 @@ class MCPGuard:
         reached: list[bool] = []
 
         def invoke(verified_args: dict[str, Any]) -> Any:
-            reached.append(True)
-            return self.forward(name, verified_args)
+            value = self.forward(name, verified_args)
+            if not inspect.isawaitable(value):  # an un-awaited forward reached nothing
+                reached.append(True)
+            return value
 
-        result = self.gate.execute(result, invoke=invoke)
+        return _finish(self.gate.execute(result, invoke=invoke), reached)
 
-        if not result.allowed:  # refused at execute time (receipt mismatch, budget)
+    async def ahandle(self, name: str, args: dict[str, Any]) -> GuardedCall:
+        """handle() for async forwards and async approval handlers."""
+        result = self.gate.check({"name": name, "args": args})
+
+        if result.verdict is Verdict.NEEDS_APPROVAL:
+            result = await self.gate._aresolve_approval(result)
+
+        if not result.allowed:
             return _refused(result)
-        if result.dry_run:
-            return GuardedCall(verdict="allow", forwarded=False, reason="dry run: not forwarded")
-        if result.error is not None:  # downstream raised, or its output was withheld
-            return GuardedCall(
-                verdict="allow",
-                forwarded=bool(reached),
-                reason=result.error,
-                result={
-                    "isError": True,
-                    "content": [{"type": "text", "text": f"toolwall: {result.error}"}],
-                },
-            )
-        return GuardedCall(verdict="allow", forwarded=True, result=result.return_value)
+
+        reached: list[bool] = []
+
+        def invoke(verified_args: dict[str, Any]) -> Any:
+            reached.append(True)
+            return self.forward(name, verified_args)  # aexecute awaits it
+
+        return _finish(await self.gate.aexecute(result, invoke=invoke), reached)
+
+
+def _finish(result: GateResult, reached: list[bool]) -> GuardedCall:
+    if not result.allowed:  # refused at execute time (receipt mismatch, budget)
+        return _refused(result)
+    if result.dry_run:
+        return GuardedCall(verdict="allow", forwarded=False, reason="dry run: not forwarded")
+    if result.error is not None:  # downstream raised, or its output was withheld
+        return GuardedCall(
+            verdict="allow",
+            forwarded=bool(reached),
+            reason=result.error,
+            result={
+                "isError": True,
+                "content": [{"type": "text", "text": f"toolwall: {result.error}"}],
+            },
+        )
+    return GuardedCall(verdict="allow", forwarded=True, result=result.return_value)
 
 
 def _refused(result: GateResult) -> GuardedCall:

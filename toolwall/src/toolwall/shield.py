@@ -16,6 +16,7 @@ import enum
 import math
 import numbers
 import email.message
+import inspect
 import re
 import sqlite3
 import types
@@ -383,7 +384,7 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
             continue
         seen.add(id(item))
         keep.append(item)
-        if isinstance(item, Iterator):
+        if isinstance(item, Iterator) or inspect.isawaitable(item):
             raise _unscannable(item)
         if isinstance(item, array.array):
             # Element-wise each entry is one char or one int; scan the text it holds.

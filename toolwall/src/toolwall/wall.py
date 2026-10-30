@@ -95,6 +95,13 @@ class ToolWall:
         """Check the call and execute it only if allowed."""
         return self.gate.run({"name": name, "args": args or {}})
 
+    async def acall(self, name: str, args: dict[str, Any] | None = None) -> GateResult:
+        """call() for async tools: awaits the tool, then scans what it returned.
+
+        Works for sync tools too. Async approval handlers are awaited here.
+        """
+        return await self.gate.arun({"name": name, "args": args or {}})
+
     def check(self, name: str, args: dict[str, Any] | None = None) -> GateResult:
         """Return the verdict without executing anything."""
         return self.gate.check({"name": name, "args": args or {}})
@@ -102,6 +109,10 @@ class ToolWall:
     def guard(self, response: Any) -> list[GateResult]:
         """Gate a raw LLM response (OpenAI/Anthropic/Gemini), possibly many calls."""
         return self.gate.run_all(response)
+
+    async def aguard(self, response: Any) -> list[GateResult]:
+        """guard() for async tools. Calls run one at a time, in order."""
+        return await self.gate.arun_all(response)
 
     # -- dry-run + reporting -------------------------------------------------
 
