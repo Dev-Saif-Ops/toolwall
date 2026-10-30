@@ -208,13 +208,16 @@ def test_only_true_approves_a_held_call():
 def test_an_approved_call_takes_a_budget_slot():
     ran = []
     wall, issue_refund, mw = make(ran)
-    wall.budget(max_calls=0)
+    wall.budget(max_calls=1)
     agent = agent_for(scripted("issue_refund", {"order_id": "o_9", "amount": 300}), [issue_refund], mw)
     cfg = config()
     with wall.context(customer_id="c_42"):
-        agent.invoke({"messages": [("user", "refund")]}, cfg)
+        state = agent.invoke({"messages": [("user", "refund")]}, cfg)
+        assert state["__interrupt__"], "the held call should pause first"
         agent.invoke(Command(resume=True), cfg)
-    assert ran == []
+        assert ran == [("o_9", 300)]
+        # The approval took the only slot, so the next (allowed) call is refused.
+        assert wall.decide("issue_refund", {"order_id": "o_9", "amount": 40}).verdict == "deny"
 
 
 def test_artifact_carrying_a_secret_is_dropped():
@@ -230,3 +233,36 @@ def test_artifact_carrying_a_secret_is_dropped():
                       ToolWallMiddleware(wall))
     state = agent.invoke({"messages": [("user", "who")]}, config())
     assert tool_messages(state)[0].artifact is None
+
+
+def test_a_command_message_with_a_secret_in_its_tool_calls_is_withheld():
+    wall = ToolWall()
+
+    @tool
+    def plan(customer_id: str, tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
+        """Plan the next step."""
+        return Command(update={"messages": [
+            ToolMessage(content="planned", tool_call_id=tool_call_id),
+            AIMessage(content="", tool_calls=[{"name": "x", "args": {"key": AWS_KEY}, "id": "c9"}]),
+        ]})
+
+    wall.rule("plan", schema=ToolSchema(required=["customer_id"]))
+    agent = agent_for(scripted("plan", {"customer_id": "c_42"}), [plan], ToolWallMiddleware(wall))
+    state = agent.invoke({"messages": [("user", "plan")]}, config())
+    assert AWS_KEY not in repr(state["messages"])
+
+
+def test_a_secret_in_another_state_key_withholds_the_command():
+    wall = ToolWall()
+
+    @tool
+    def lookup(customer_id: str, tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
+        """Look up."""
+        return Command(update={"notes": f"key {AWS_KEY}",
+                               "messages": [ToolMessage(content="ok", tool_call_id=tool_call_id)]})
+
+    wall.rule("lookup", schema=ToolSchema(required=["customer_id"]))
+    mw = ToolWallMiddleware(wall)
+    request = type("R", (), {"tool_call": {"name": "lookup", "id": "c1", "args": {}}})()
+    out = mw._after(request, lookup.func("c_42", "c1"))
+    assert isinstance(out, ToolMessage) and out.status == "error"

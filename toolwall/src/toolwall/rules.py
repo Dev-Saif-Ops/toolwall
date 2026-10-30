@@ -181,6 +181,8 @@ def owned_by(key: str, *, lookup: Callable[[Any], Any]) -> Rule:
     allows only orders of the customer the agent is serving. A missing record
     (lookup returns None) or a missing context key fails. A lookup that raises
     fails closed through the policy. A lookup that returns an awaitable fails.
+    Negated, ~owned_by(...) is true on a missing record or an owner of another
+    type; for "not their own record" checks, make the lookup raise on a miss.
     """
 
     def check(value: Any) -> bool:
@@ -231,7 +233,7 @@ _SQL_WRITE = re.compile(
     r"shutdown|kill|backup|restore|dbcc|deny|checkpoint|waitfor|use|begin|commit|"
     r"rollback|disable|enable|receive|send|declare|deallocate|raiserror|throw|goto|"
     r"print|reconfigure|bulk|openrowset|opendatasource|openquery|while|return|break|"
-    r"continue|setuser|revert|writetext|updatetext|readtext|fetch|save|add|"
+    r"continue|setuser|revert|writetext|updatetext|readtext|save|add|"
     r"xp_\w+|sp_\w+)\b",
     re.I,
 )
@@ -250,7 +252,7 @@ def _sql_code(text: str) -> str | None:
 
 
 def sql_readonly() -> Rule:
-    """One read-only statement in a portable subset of SQL.
+    """One read-only statement (best effort on SQL Server) in a portable subset of SQL.
 
     Allowed: a single statement starting with SELECT or WITH (one trailing ;),
     '...' strings and "..." identifiers with doubled quotes, plain ASCII

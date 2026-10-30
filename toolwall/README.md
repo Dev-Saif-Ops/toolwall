@@ -230,7 +230,9 @@ async def issue_refund(order_id: str, amount: int | float) -> str: ...
 
 Denied calls never run and the model gets a short, safe reason. Calls that need
 a person pause through the framework's own approval flow. Tool output is
-checked for secrets before the model sees it. Install with
+checked for secrets before the model sees it (with the Claude Agent SDK, only
+when the tool succeeds: wrap your own tools with `wall.protect` so error text is
+scrubbed too; see the guide). Install with
 `pip install "toolwall[openai-agents]"` (or `claude-agent-sdk`, `langchain`,
 `mcp`, `integrations` for all).
 Full guide: [docs/frameworks.md](https://github.com/Dev-Saif-Ops/toolwall/blob/main/docs/frameworks.md).

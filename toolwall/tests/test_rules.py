@@ -510,7 +510,7 @@ TSQL_VERBS = (
     "shutdown kill backup restore dbcc deny checkpoint waitfor use begin commit rollback "
     "disable enable receive send declare deallocate raiserror throw goto print reconfigure "
     "bulk openrowset opendatasource openquery while return break continue setuser revert "
-    "writetext updatetext readtext fetch save add xp_cmdshell sp_configure"
+    "writetext updatetext readtext save add xp_cmdshell sp_configure"
 ).split()
 
 
@@ -547,3 +547,23 @@ def test_sql_readonly_doubled_quotes_stay_inside_the_string():
     assert r.sql_readonly()("SELECT 'it''s' FROM t")
     assert r.sql_readonly()('SELECT "a""b" FROM t')
     assert not r.sql_readonly()("SELECT 'it''; DROP TABLE t; --' FROM t; DROP TABLE t")
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT id FROM orders ORDER BY id OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY",
+    "SELECT id FROM orders ORDER BY id FETCH FIRST 10 ROWS ONLY",
+])
+def test_sql_readonly_allows_standard_pagination(sql):
+    assert r.sql_readonly()(sql)
+
+
+def test_a_context_value_of_none_counts_as_unset():
+    from toolwall import ToolWall
+
+    wall = ToolWall()
+    wall.rule("send", schema=__import__("toolwall").ToolSchema(required=["to"]),
+              to=~r.equals_context("blocked_email"))
+    with wall.context(blocked_email=None):
+        assert wall.decide("send", {"to": "a@b.c"}).denied
+    with wall.context(blocked_email="x@y.z"):
+        assert wall.decide("send", {"to": "a@b.c"}).allowed

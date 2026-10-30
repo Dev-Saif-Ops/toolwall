@@ -110,8 +110,14 @@ class ToolWallMiddleware(AgentMiddleware):
             if isinstance(m, ToolMessage):
                 cleaned.append(self._scan_message(request, m))
                 continue
-            checked = self.wall.check_output(request.tool_call.get("name"), getattr(m, "content", m))
-            if checked.withheld or checked.value is not getattr(m, "content", m):
+            # Every field the provider may send (content, tool_calls,
+            # invalid_tool_calls...), not just the text.
+            try:
+                fields = m.model_dump() if hasattr(m, "model_dump") else m
+            except Exception:
+                return self._withheld_command(request, command)
+            checked = self.wall.check_output(request.tool_call.get("name"), fields)
+            if checked.withheld or checked.value is not fields:
                 return self._withheld_command(request, command)
             cleaned.append(m)
         return dataclasses.replace(command, update={**others, "messages": cleaned})
