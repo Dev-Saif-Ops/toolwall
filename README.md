@@ -355,7 +355,7 @@ ticket never runs. Inside a framework, the same call coming back after approval
 runs once without pausing again (Claude Agent SDK: `hooks(wall, on_hold="defer")`).
 Full guide: [docs/approvals.md](docs/approvals.md).
 
-## Refund Desk: six attacks on a support agent
+## Refund Desk: eight attacks on a support agent
 
 [refund-desk/](refund-desk/) is a small support agent on the OpenAI Agents SDK
 with a SQLite shop behind it. One command runs eight attacks (a prompt-injected

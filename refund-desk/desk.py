@@ -28,6 +28,7 @@ ORDERS = [
     # id, customer, total
     ("o_9", "c_42", 120),
     ("o_12", "c_42", 400),
+    ("o_31", "c_42", 2000),  # a big order: a second 350 still fits under its total
     ("o_77", "c_7", 900),
 ]
 

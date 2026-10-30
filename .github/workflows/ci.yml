@@ -48,7 +48,7 @@ jobs:
           set -o pipefail
           python -m pytest -q -W error::RuntimeWarning -rs tests/integrations | tee /tmp/int.txt
           ! grep -q SKIPPED /tmp/int.txt
-      - name: Refund Desk (six attacks land without ToolWall, stopped with it; honest requests work)
+      - name: Refund Desk (eight attacks land without ToolWall, stopped with it; honest requests work)
         run: python refund-desk/run.py --check
       - name: MCP adapter on mcp 1.x
         working-directory: toolwall
