@@ -85,6 +85,12 @@ def _resolve_annotation(ann: Any) -> "tuple[type, ...] | object | None":
         return (type(None),)
     # On 3.10, isinstance(list[str], type) is True; GenericAlias is handled above.
     if isinstance(ann, type) and not isinstance(ann, types.GenericAlias):
+        # Some classes refuse isinstance() altogether (TypedDict, a Protocol that is
+        # not runtime_checkable). Inferring them would make a tool no call can pass.
+        try:
+            isinstance(None, ann)
+        except TypeError:
+            return None
         return (int, float) if ann is float else (ann,)
     return None
 

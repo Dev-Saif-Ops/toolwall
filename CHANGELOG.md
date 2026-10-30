@@ -32,7 +32,8 @@ async agent framework. Every fix has a test that fails on 0.4.2.
   are annotated (no `**kwargs`). Supported: classes, `X | None`, `Optional`, `Union`,
   generic containers (the container is checked, not its items), `Any` and
   `Annotated[...]`; `float` also accepts an integer, since JSON has one number type.
-  `Literal`, a lambda or a partly annotated function still needs a schema and is
+  `Literal`, `TypedDict`, a non-runtime `Protocol` (any class that refuses
+  `isinstance`), a lambda or a partly annotated function still needs a schema and is
   denied by default until it has one; `infer_schema=False` opts out. `Gate` is
   unchanged. String annotations (`from __future__ import annotations`) are resolved
   once, at registration, so their types are enforced; an annotation that can't be
@@ -54,7 +55,7 @@ async agent framework. Every fix has a test that fails on 0.4.2.
 - PyPI metadata: Python version classifiers, project URLs (site, source, changelog,
   issues, security policy), and the keywords `agent-sandbox` and `mcp-proxy`
   removed, since toolwall is neither.
-- 245 to 292 tests.
+- 245 to 300 tests.
 
 ## [0.4.2] - 2026-10-05
 

@@ -11,7 +11,7 @@
 >
 > Your LLM can generate a **valid** tool call. That doesn't mean it's **safe** to execute.
 
-**Status: v0.4.3 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 292 tests in CI on Python 3.10–3.13 · published attack suite.**
+**Status: v0.4.3 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 300 tests in CI on Python 3.10–3.13 · published attack suite.**
 
 ```bash
 pip install toolwall
@@ -223,8 +223,8 @@ return a materialised list instead.
 A function whose parameters and return value are all annotated gets its schema
 from its signature: classes, `X | None`, `Optional`, `Union`, generic containers
 (`list[str]` checks for a list), `Any` and `Annotated[...]`; `float` also accepts an
-integer. Anything else (`Literal`, a lambda, a partly annotated function) still
-needs `schema=`.
+integer. Anything else (`Literal`, `TypedDict`, a `Protocol`, a lambda, a partly
+annotated function) still needs `schema=`, for example `types={"filters": dict}`.
 
 
 Two policy details worth knowing: `matches()` is a full match (anchor nothing, the
@@ -303,7 +303,7 @@ Run the tests and the published attack suite yourself:
 
 ```bash
 cd toolwall && pip install -e ".[dev]"
-pytest                                    # 292 tests
+pytest                                    # 300 tests
 python ../gate-suite/run_suite.py         # 35/35 attacks blocked, prints the G1 report
 ```
 

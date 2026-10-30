@@ -186,3 +186,55 @@ def test_annotations_are_evaluated_once_at_registration():
     exec("from __future__ import annotations\ndef f(n: mark()) -> int:\n    return n\n", ns)
     ToolWall().register("f", ns["f"])
     assert len(seen) == 1
+
+
+# --- round 3 (critic, 0.4.3) ----------------------------------------------------
+
+from typing import Literal, Protocol, TypedDict
+
+
+class Filters(TypedDict):
+    city: str
+
+
+class Greeter(Protocol):
+    def greet(self) -> str: ...
+
+
+def test_typeddict_and_protocol_params_are_not_inferred():
+    def search(filters: Filters) -> str:
+        return "ok"
+
+    def greet(g: Greeter) -> str:
+        return "ok"
+
+    def maybe(filters: Optional[Filters] = None) -> str:
+        return "ok"
+
+    for name, fn in (("search", search), ("greet", greet), ("maybe", maybe)):
+        wall = ToolWall()
+        wall.register(name, fn)
+        r = wall.call(name, {})
+        assert r.verdict is Verdict.BLOCK and "no schema" in r.reason, name
+    # and with an explicit schema the TypedDict tool works
+    wall = ToolWall()
+    wall.register("search", search, schema=ToolSchema(required=["filters"], types={"filters": dict}))
+    assert wall.call("search", {"filters": {"city": "Riyadh"}}).executed
+
+
+def test_union_with_an_unsupported_member_is_not_inferred():
+    def f(x: Union[Literal["a"], int]) -> str:
+        return "ok"
+
+    wall = ToolWall()
+    wall.register("f", f)
+    assert "no schema" in wall.call("f", {"x": 1}).reason
+
+
+def test_union_with_any_accepts_anything():
+    def f(x: Union[Any, int]) -> str:
+        return "ok"
+
+    wall = ToolWall()
+    wall.register("f", f)
+    assert wall.call("f", {"x": {"any": "thing"}}).executed

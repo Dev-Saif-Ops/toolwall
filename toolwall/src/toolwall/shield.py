@@ -391,8 +391,10 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
             isinstance(item, Iterator)
             or inspect.isawaitable(item)
             or inspect.isasyncgen(item)
-            or hasattr(item, "__aiter__")
-            or hasattr(item, "__anext__")
+            # On the type, as `async for` looks it up: probing the instance would run
+            # __getattr__ on attr-dicts and withhold plain data.
+            or hasattr(type(item), "__aiter__")
+            or hasattr(type(item), "__anext__")
         ):
             raise _unscannable(item)
         if isinstance(item, array.array):

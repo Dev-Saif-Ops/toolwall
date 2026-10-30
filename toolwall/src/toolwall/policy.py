@@ -166,5 +166,10 @@ class Policy:
                 if isinstance(verdict, str):
                     errors.append(verdict)
                 elif verdict:
-                    errors.extend(verdict)
+                    for item in verdict:
+                        if inspect.isawaitable(item):
+                            discard_awaitable(item)
+                            errors.append("policy cross-rule returned an awaitable: fails closed")
+                        else:
+                            errors.append(item)
         return errors

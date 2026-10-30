@@ -668,6 +668,9 @@ class Gate:
                 granted = await granted
         except Exception as exc:
             return self._approval_failed(result, f"approval handler raised {type(exc).__name__}: fails closed")
+        except BaseException:
+            self._issued.pop(id(result), None)  # cancelled mid-approval: never runnable
+            raise
         if inspect.isawaitable(granted):
             discard_awaitable(granted)
             return self._approval_failed(result, "approval handler returned an awaitable: fails closed")

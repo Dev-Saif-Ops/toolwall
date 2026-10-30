@@ -102,8 +102,8 @@ return a materialised list instead.
 A function whose parameters and return value are all annotated gets its schema
 from its signature: classes, `X | None`, `Optional`, `Union`, generic containers
 (`list[str]` checks for a list), `Any` and `Annotated[...]`; `float` also accepts an
-integer. Anything else (`Literal`, a lambda, a partly annotated function) still
-needs `schema=`.
+integer. Anything else (`Literal`, `TypedDict`, a `Protocol`, a lambda, a partly
+annotated function) still needs `schema=`, for example `types={"filters": dict}`.
 
 
 ## What it stops

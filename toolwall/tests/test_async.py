@@ -419,3 +419,77 @@ def test_mcp_sync_handle_with_async_forward_is_not_forwarded():
     gate.register("t", lambda: None, schema=ToolSchema())
     out = no_unawaited_coroutines(lambda: MCPGuard(gate, forward).handle("t", {}))
     assert out.forwarded is False
+
+
+def test_class_defining_only_aiter_is_withheld():
+    class Stream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    gate = Gate(default="allow", shield=Shield(mode="block"))
+    gate.register("t", lambda: Stream())
+    assert gate.run({"name": "t", "args": {}}).return_value is None
+
+
+def test_attr_dict_output_is_not_withheld_by_the_async_check():
+    class AttrDict(dict):
+        def __getattr__(self, k):
+            return self[k]  # KeyError for unknown attributes, like many attr-dicts
+
+    gate = Gate(default="allow", shield=Shield(mode="block"))
+    gate.register("t", lambda: AttrDict(city="Riyadh"))
+    result = gate.run({"name": "t", "args": {}})
+    assert result.error is None and result.return_value == {"city": "Riyadh"}
+    gate.register("leak", lambda: AttrDict(key=AWS_KEY))
+    leaked = gate.run({"name": "leak", "args": {}})
+    assert "secret detected" in leaked.error  # named, not "could not be scanned (KeyError)"
+
+
+def test_sync_interrupt_mid_tool_is_audited_and_reraised():
+    def tool():
+        raise KeyboardInterrupt
+
+    wall = ToolWall()
+    wall.register("t", tool, schema=ToolSchema())
+    with pytest.raises(KeyboardInterrupt):
+        wall.call("t")
+    events = [e for e in wall.meter.report.events if e.kind == "tool"]
+    assert len(events) == 1 and "cancelled" in events[0].error
+
+
+def test_cross_rule_list_with_a_coroutine_fails_closed_without_warnings():
+    async def nested():
+        return "x"
+
+    def cross(args):
+        return [nested()]
+
+    ran = []
+    wall = ToolWall()
+    wall.register("t", lambda x: ran.append(x), schema=ToolSchema(required=["x"]),
+                  policy=Policy(cross=cross))
+    result = no_unawaited_coroutines(lambda: wall.call("t", {"x": 1}))
+    assert ran == [] and result.verdict is Verdict.BLOCK
+
+
+def test_cancelled_async_approval_leaves_no_issue_record():
+    async def slow_approval(result):
+        await asyncio.sleep(10)
+        return True
+
+    wall = ToolWall(approval=slow_approval)
+    wall.register("wipe", lambda id: None, schema=ToolSchema(required=["id"]),
+                  policy=Policy(require_approval=True))
+
+    async def main():
+        task = asyncio.ensure_future(wall.acall("wipe", {"id": 1}))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    run(main())
+    assert len(wall.gate._issued) == 0
