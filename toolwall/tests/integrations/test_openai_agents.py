@@ -365,11 +365,14 @@ def test_always_approve_on_one_agent_does_not_cover_a_namesake_after_a_handoff()
     assert ran == [("A", 300)]
 
 
-def test_the_approval_check_failing_counts_as_not_approved(monkeypatch):
+def test_the_approval_check_failing_counts_as_not_approved():
     import toolwall.integrations.openai_agents as oa
 
     class Broken:
+        agent = Agent(name="support")
+        tool_call = refund_call("c1", 300)
         tool_name = "issue_refund"
+        tool_namespace = None
         tool_call_id = "c1"
 
         def get_approval_status(self, *a, **k):

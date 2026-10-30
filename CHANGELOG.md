@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.7.0] - unreleased
+## [0.7.0] - 2026-10-30
 
 Approvals that bind the exact call: a held call gets a ticket, a person approves
 it later, and exactly that call runs, once.
@@ -27,6 +27,7 @@ it later, and exactly that call runs, once.
 - `python -m toolwall approvals list|show|approve|deny --db FILE`: a CLI approver
   for a SQLite store.
 - `examples/approval_tickets.py` and `docs/approvals.md`.
+- 559 to 617 tests.
 
 ### Security notes
 - A ticket covers exactly one call: a different amount (including `300` vs
