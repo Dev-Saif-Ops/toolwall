@@ -32,15 +32,16 @@ class ScriptedModel(Model):
     """Calls one tool with fixed arguments, then answers with text. Records
     every input it was given, so tests can see what the model was told."""
 
-    def __init__(self, tool: str, args: dict):
-        self.tool, self.args, self.seen = tool, args, []
+    def __init__(self, tool: str, args: dict, namespace: str | None = None):
+        self.tool, self.args, self.seen, self.namespace = tool, args, [], namespace
 
     async def get_response(self, system_instructions, input, model_settings, tools,
                            output_schema, handoffs, tracing, **kwargs):
         self.seen.append(input)
         if len(self.seen) == 1:
+            extra = {"namespace": self.namespace} if self.namespace else {}
             item = ResponseFunctionToolCall(type="function_call", call_id="c1", id="fc1",
-                                            name=self.tool, arguments=json.dumps(self.args))
+                                            name=self.tool, arguments=json.dumps(self.args), **extra)
         else:
             item = ResponseOutputMessage(id="m1", type="message", role="assistant", status="completed",
                                          content=[ResponseOutputText(type="output_text", text="done",
@@ -259,3 +260,19 @@ def test_approving_in_the_sdk_settles_the_ticket():
         asyncio.run(Runner.run(agent, state))
     assert ran == [("o_9", 300)]
     assert wall.approvals.pending() == [] and wall.approvals.get(ticket).status == "used"
+
+
+def test_an_approved_call_to_a_namespaced_tool_runs():
+    from agents.tool import tool_namespace
+
+    ran = []
+    wall, tool = make(ran)
+    agent = Agent(name="support", tools=tool_namespace(name="billing", description="Billing", tools=[tool]),
+                  model=ScriptedModel("issue_refund", {"order_id": "o_9", "amount": 300}, namespace="billing"))
+    with wall.context(customer_id="c_42"):
+        result = run(agent)
+        assert result.interruptions and ran == []
+        state = result.to_state()
+        state.approve(result.interruptions[0])
+        asyncio.run(Runner.run(agent, state))
+    assert ran == [("o_9", 300)]

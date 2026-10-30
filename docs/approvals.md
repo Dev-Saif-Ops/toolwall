@@ -89,7 +89,8 @@ SDK doesn't tell the wall about a rejection, so that ticket stays pending until
 it expires; approving it from the queue later is a fresh, explicit approval.
 
 The OpenAI adapter treats a held call as approved only when the SDK says a
-person approved that exact call. If the approved ticket the SDK's check saw is
+person approved that exact call (or chose "always approve" for the tool, which
+the SDK applies to later calls too). If the approved ticket the SDK's check saw is
 used up before the call runs (another worker got there first), the call is
 refused rather than run twice.
 

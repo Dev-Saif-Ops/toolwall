@@ -15,15 +15,15 @@ as one (guard_tool(wall) does the same and binds the name for you):
 - needs_approval: True when the wall says "ask", so the SDK pauses the run for a
   person (see the SDK's human-in-the-loop docs for approving and resuming).
 - tool_input_guardrails: the wall's verdict right before the tool runs. "deny"
-  replaces the call with a model-safe reason. "ask" reaching this point means the
-  SDK's approval said yes: the call takes its budget slot and runs.
+  replaces the call with a model-safe reason. A held call runs only when the SDK
+  records that a person approved this call (or chose "always approve" for the
+  tool); it then takes its budget slot. Otherwise it is rejected.
 - tool_output_guardrails: what the tool returned, scanned for secrets. Withheld
   output, or a redacted copy, replaces it.
 
-Use all three together. The input guardrail treats "ask" as approved because
-needs_approval is what asks; on its own it would let a held call run. The SDK
-runs input guardrails after approval by default; don't enable its
-pre-approval guardrail option with these.
+Use all three together: needs_approval is what asks a person, and the input
+guardrail is what checks the answer. The SDK runs input guardrails after
+approval by default; don't enable its pre-approval guardrail option with these.
 
 The tool's name in the SDK (the function name, or name_override) is the name
 the wall's rules use.
@@ -62,10 +62,19 @@ def _reject(name: str) -> Any:
 
 
 def _approved_in_sdk(ctx: Any) -> bool:
-    try:
-        return ctx.is_tool_approved(ctx.tool_name, ctx.tool_call_id) is True
-    except Exception:
-        return False
+    """The SDK records that a person approved this call (by its call id). A tool
+    in a tool_namespace is filed under its qualified name."""
+    names = []
+    for name in (getattr(ctx, "qualified_tool_name", None), ctx.tool_name):
+        if isinstance(name, str) and name not in names:
+            names.append(name)
+    for name in names:
+        try:
+            if ctx.is_tool_approved(name, ctx.tool_call_id) is True:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def guardrails(wall: "ToolWall", tool_name: str | None = None) -> dict[str, Any]:

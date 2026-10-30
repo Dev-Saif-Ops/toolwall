@@ -46,3 +46,10 @@ def test_list_approve_and_run(tmp_path):
 def test_missing_database_is_an_error(tmp_path):
     code, out = cli("list", "--db", str(tmp_path / "nope.db"))
     assert code == 2 and not (tmp_path / "nope.db").exists()
+
+
+def test_a_file_that_is_not_a_database_is_an_error(tmp_path):
+    bogus = tmp_path / "notes.txt"
+    bogus.write_text("not sqlite " * 100)
+    code, out = cli("list", "--db", str(bogus))
+    assert code == 2 and "Traceback" not in out

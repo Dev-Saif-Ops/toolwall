@@ -315,11 +315,12 @@ def test_the_newest_live_ticket_is_the_one_found(store, monkeypatch):
     monkeypatch.setattr(approvals_mod.time, "time", lambda: clock[0])
     approvals = Approvals(store, ttl=60)
     first = approvals.open("t", {"a": 1}, {}, None)
-    approvals.deny(first.id, by="ops")
-    clock[0] += 61
-    second = approvals.open("t", {"a": 1}, {}, None)
     clock[0] += 1
-    assert approvals.lookup("t", {"a": 1}, {}).id == second.id
+    # Two live tickets for one call (two processes opening at once).
+    second = approvals_mod.replace(first, id="tkt_second", created_at=clock[0],
+                                   expires_at=clock[0] + 60)
+    store.add(second)
+    assert approvals.lookup("t", {"a": 1}, {}).id == "tkt_second"
 
 
 def test_redeem_is_atomic_in_every_store(store):
@@ -348,8 +349,11 @@ def test_sqlite_drops_tickets_a_day_past_expiry(tmp_path, monkeypatch):
     store = SQLiteStore(str(tmp_path / "t.db"))
     approvals = Approvals(store, ttl=60)
     old = approvals.open("t", {"a": 1}, {}, None)
-    clock[0] += 60 + 86400 + 1
+    clock[0] += 61
     approvals.open("t", {"a": 2}, {}, None)
+    assert store.get(old.id) is not None  # expired, but kept for a day
+    clock[0] += 86400
+    approvals.open("t", {"a": 3}, {}, None)
     assert store.get(old.id) is None
     store.close()
 
@@ -362,6 +366,16 @@ def test_an_approved_ticket_that_cannot_be_redeemed_does_not_run():
     with wall.context(customer_id="c_42"):
         result = wall.call("issue_refund", {"order_id": "o_9", "amount": 300})
     assert result.blocked and ran == []
+
+
+def test_a_ticket_allow_through_decide_is_refused_when_the_budget_is_spent_meanwhile():
+    wall, _, _ = refund_wall()
+    with wall.context(customer_id="c_42"):
+        first = wall.decide("issue_refund", {"order_id": "o_9", "amount": 300})
+        wall.approvals.approve(first.ticket, by="ops")
+        wall.gate._reserve_budget = lambda call: "budget spent"  # spent between check and redeem
+        second = wall.decide("issue_refund", {"order_id": "o_9", "amount": 300})
+    assert second.denied and wall.approvals.get(first.ticket).status == "approved"
 
 
 def test_a_ticket_allow_through_decide_counts_against_the_budget():
@@ -419,3 +433,42 @@ def test_run_approved_refuses_before_using_up_the_ticket():
     with pytest.raises(TicketError):
         asyncio.run(wall.arun_approved(ticket))
     assert wall.approvals.get(ticket).status == "approved"
+
+
+def test_run_approved_refuses_a_tool_the_wall_does_not_run():
+    wall = ToolWall()
+    wall.rule("refund", schema=__import__("toolwall").ToolSchema(required=["a"]), require_approval=True)
+    ticket = wall.decide("refund", {"a": 1}).ticket
+    wall.approvals.approve(ticket, by="ops")
+    with pytest.raises(TicketError):
+        wall.run_approved(ticket)
+    assert wall.approvals.get(ticket).status == "approved"
+
+
+def test_close_only_settles_as_used_or_denied():
+    approvals = Approvals()
+    ticket = approvals.open("t", {"a": 1}, {}, None)
+    with pytest.raises(ValueError):
+        approvals.close(ticket.id, "approved")
+    assert approvals.close(ticket.id, "used") and not approvals.close(ticket.id, "denied")
+
+
+@pytest.mark.parametrize("ttl", [0, -1, float("nan")])
+def test_ttl_must_be_positive(ttl):
+    with pytest.raises(ValueError):
+        Approvals(ttl=ttl)
+
+
+def test_a_denial_is_remembered_until_a_day_past_expiry_in_memory(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(approvals_mod.time, "time", lambda: clock[0])
+    store = approvals_mod.MemoryStore()
+    approvals = Approvals(store, ttl=60)
+    denied = approvals.open("t", {"a": 1}, {}, None)
+    approvals.deny(denied.id, by="ops")
+    clock[0] += 61
+    approvals.open("t", {"a": 2}, {}, None)  # add() prunes
+    assert store.get(denied.id) is not None
+    clock[0] += 86400
+    approvals.open("t", {"a": 3}, {}, None)
+    assert store.get(denied.id) is None
