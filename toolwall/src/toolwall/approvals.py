@@ -195,14 +195,15 @@ class SQLiteStore:
     def transition(self, ticket_id: str, from_status: Iterable[Status], to_status: Status,
                    now: float, by: str | None = None, note: str | None = None) -> bool:
         allowed = tuple(from_status)
+        # Only "?" placeholders are formatted into the SQL; every value is bound.
         marks = ",".join("?" * len(allowed))
         if by is not None:
             sql = (f"UPDATE toolwall_tickets SET status = ?, decided_by = ?, decided_at = ?,"
-                   f" note = ? WHERE id = ? AND status IN ({marks}) AND expires_at > ?")
+                   f" note = ? WHERE id = ? AND status IN ({marks}) AND expires_at > ?")  # nosec B608
             params: tuple[Any, ...] = (to_status, by, now, note, ticket_id, *allowed, now)
         else:
             sql = (f"UPDATE toolwall_tickets SET status = ? WHERE id = ?"
-                   f" AND status IN ({marks}) AND expires_at > ?")
+                   f" AND status IN ({marks}) AND expires_at > ?")  # nosec B608
             params = (to_status, ticket_id, *allowed, now)
         with self._lock:
             return self._db.execute(sql, params).rowcount == 1
@@ -255,7 +256,8 @@ class Approvals:
             state = ticket.status if ticket else "unknown"
             raise TicketError(f"ticket {ticket_id!r} can't be {to}: it is {state}")
         ticket = self.store.get(ticket_id)
-        assert ticket is not None
+        if ticket is None:  # removed from the store in between
+            raise TicketError(f"ticket {ticket_id!r} disappeared from the store")
         return ticket
 
     # -- for the wall -----------------------------------------------------------

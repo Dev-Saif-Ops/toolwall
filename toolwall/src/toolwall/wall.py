@@ -350,7 +350,8 @@ class ToolWall:
         """A held call and its ticket: an approved ticket for exactly this call and
         context lets it run (used up only when reserve=True; a probe just looks), a
         denied one declines it, and otherwise the call waits on a pending ticket."""
-        assert self.approvals is not None and result.call is not None
+        if self.approvals is None or result.call is None:  # callers check; never reached
+            return result, None
         ctx = dict(_context.current())
         try:
             ticket = self.approvals.lookup(result.call.name, result.call.args, ctx)

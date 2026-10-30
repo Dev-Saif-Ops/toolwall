@@ -167,7 +167,7 @@ class GateResult:
             "schema": f"The arguments don't match what this tool accepts{(' (check' + where + ')') if where else ''}.",
             "policy": (f"The value for{where} isn't allowed for this call." if where
                        else "This call isn't allowed by policy."),
-            "secret": "The arguments contain what looks like a secret. Remove it and try again.",
+            "secret": "The arguments contain what looks like a secret. Remove it and try again.",  # nosec B105
             "budget": "The limit for calls to this tool has been reached.",
             "approval_denied": "A person declined this call.",
             "decide_only": "This call can't be run here.",
@@ -358,7 +358,7 @@ class Gate:
         # arguments after the verdict and before execution.
         try:
             call.args = copy.deepcopy(call.args)
-        except Exception:
+        except Exception:  # nosec B110
             # Uncopyable arguments are left as-is; the receipt below is then the
             # only thing standing between check and execute, and it is required.
             pass
@@ -799,7 +799,7 @@ class Gate:
                 ticket = self.tickets.open(result.call.name, result.call.args,
                                            dict(_context.current()), "; ".join(result.reasons) or None)
                 result.ticket = ticket.id
-            except Exception:
+            except Exception:  # nosec B110
                 pass  # can't be held for later: it stays held, with no ticket
         return result
 

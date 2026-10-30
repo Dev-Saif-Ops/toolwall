@@ -31,6 +31,21 @@ jobs:
       - name: No-key demo
         run: python -m toolwall demo --no-color
 
+  lint:
+    name: lint + static analysis (ruff, bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install ruff bandit
+      - name: ruff (pyflakes, pycodestyle, bugbear)
+        run: ruff check toolwall/src --select E,F,W,B --ignore E501
+      - name: bandit (static security analysis)
+        run: bandit -q -r toolwall/src
+
   integrations:
     name: framework adapters (OpenAI Agents, Claude Agent SDK, LangChain, MCP)
     runs-on: ubuntu-latest

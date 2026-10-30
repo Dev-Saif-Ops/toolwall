@@ -78,7 +78,7 @@ def suggest_policies(source: Any) -> str:
                 )
 
         types_src = ", ".join(f'"{k}": {t}' for k, t in types.items())
-        lines.append(f"gate.register(")
+        lines.append("gate.register(")
         lines.append(f'    "{name}",')
         lines.append(f"    {name},  # TODO: point at your real callable")
         lines.append(

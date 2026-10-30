@@ -24,7 +24,7 @@ import uuid
 from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import ItemsView, Iterator, KeysView, Mapping, Sequence, ValuesView
 from dataclasses import dataclass
-from typing import Any, Iterator, Literal
+from typing import Any, Literal
 
 Mode = Literal["redact", "block", "warn"]
 

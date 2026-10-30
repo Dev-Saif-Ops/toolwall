@@ -41,7 +41,19 @@ pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-Currently 300 tests, run in CI on Python 3.10 to 3.13.
+Currently 554 tests (617 with `pip install -e ".[dev,integrations]"`, which adds
+the framework adapter tests), run in CI on Python 3.10 to 3.13.
+
+CI also runs a linter and a static security analyser on the library; run them
+before opening a pull request:
+
+```bash
+pip install ruff bandit
+ruff check toolwall/src --select E,F,W,B --ignore E501
+bandit -r toolwall/src
+```
+
+A `# nosec` or `# noqa` needs a comment saying why the finding doesn't apply.
 
 The attack suite is separate, and it is what every public claim about toolwall
 cites:
@@ -65,7 +77,7 @@ tooling gets removed.
   case as well.
 - Do not add runtime dependencies. Zero dependencies is a deliberate constraint,
   since this library sits in the execution path of other people's agents.
-- Match the surrounding style. No formatter is enforced.
+- Match the surrounding style. No formatter is enforced; the linter above is.
 
 ## Claims
 

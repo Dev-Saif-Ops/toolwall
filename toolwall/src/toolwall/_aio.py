@@ -21,7 +21,7 @@ def is_async_callable(fn: Any) -> bool:
         fn = fn.func
     if inspect.iscoroutinefunction(fn):
         return True
-    call = getattr(fn, "__call__", None)
+    call = getattr(fn, "__call__", None)  # noqa: B004 (is __call__ async, not "is it callable")
     return call is not None and inspect.iscoroutinefunction(call)
 
 
