@@ -316,3 +316,57 @@ def test_a_message_that_cannot_be_scanned_withholds_the_command():
 
     cmd = Command(update={"messages": [ToolMessage(content="ok", tool_call_id="call_1"), Broken()]})
     assert isinstance(_after(ToolWall(), cmd), ToolMessage)
+
+
+THINKING = AIMessage(
+    content=[{"type": "thinking", "thinking": "plan the refund",
+              "signature": "ErUBCkYIBRgCIkBq3Rz9vT2mN8rB4wY6zA1cE7fGhJ5kLp0QxWs8dF3gH2jK4lM6nO8pQ1rS3tU5vW7xY9z"},
+             {"type": "tool_use", "id": "toolu_01Q8vT2mN8rB4wY6zA1cE7fG", "name": "transfer",
+              "input": {"to": "bob"}}],
+    id="msg_01Xk3PqL9vT2mN8rB4wY6zA1",
+    tool_calls=[{"name": "transfer", "args": {"to": "bob"}, "id": "toolu_01Q8vT2mN8rB4wY6zA1cE7fG"}])
+RANDOM_SECRET = "Zq8vT2mN8rB4wY6zA1cE7fGhJ5kLp0QxWs8dF3gH"  # no known pattern, high entropy
+
+
+def _after_with_state(wall, tool_result, state_messages):
+    mw = ToolWallMiddleware(wall)
+    request = type("R", (), {"tool_call": {"name": "t", "id": "call_1", "args": {}},
+                             "state": {"messages": state_messages}})()
+    return mw._after(request, tool_result)
+
+
+def test_a_handoff_after_a_reasoning_model_turn_passes():
+    from langgraph.types import Send
+
+    history = [HumanMessage(content="refund o_9", id="h1"), THINKING]
+    tm = ToolMessage(content="handed off", tool_call_id="toolu_01Q8vT2mN8rB4wY6zA1cE7fG")
+    cmd = Command(graph=Command.PARENT, goto=[Send("bob", {"messages": history + [tm]})],
+                  update={"messages": history + [tm]})
+    assert isinstance(_after_with_state(ToolWall(), cmd, history), Command)
+
+
+def test_a_new_message_the_tool_adds_is_still_scanned():
+    added = AIMessage(content=f"note {RANDOM_SECRET}", id="new1")
+    cmd = Command(update={"messages": [ToolMessage(content="ok", tool_call_id="call_1"), added]})
+    assert isinstance(_after_with_state(ToolWall(), cmd, [THINKING]), ToolMessage)
+
+
+def test_an_id_inside_tool_arguments_gets_the_full_check():
+    added = AIMessage(content="", id="new2",
+                      tool_calls=[{"name": "x", "args": {"id": RANDOM_SECRET}, "id": "call_9"}])
+    cmd = Command(update={"messages": [ToolMessage(content="ok", tool_call_id="call_1"), added]})
+    assert isinstance(_after_with_state(ToolWall(), cmd, []), ToolMessage)
+
+
+def test_a_single_send_is_scanned():
+    from langgraph.types import Send
+
+    cmd = Command(goto=Send("model", {"messages": [HumanMessage(content=f"key {AWS_KEY}")]}))
+    assert isinstance(_after(ToolWall(), cmd), ToolMessage)
+
+
+def test_redact_mode_withholds_a_command_message_with_a_secret():
+    added = AIMessage(content=f"key {AWS_KEY}", id="new3")
+    cmd = Command(update={"messages": [ToolMessage(content="ok", tool_call_id="call_1"), added]})
+    out = _after(ToolWall(redact=True), cmd)
+    assert isinstance(out, ToolMessage) and AWS_KEY not in str(out.content)

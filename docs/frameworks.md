@@ -138,11 +138,14 @@ LangGraph interrupt, which needs a checkpointer; without a checkpointer, pass
 `Command(resume={i.id: True for i in state["__interrupt__"]})`. Both `invoke`
 and `ainvoke` go through the wall.
 
-A tool that returns a `Command` (a handoff, for example) has everything in it
-scanned: the messages, other state keys and any `Send` payloads. Ids are checked
-for known secret patterns only. If a secret is found anywhere, the whole
-Command is withheld and the model gets an error message instead, so a handoff
-that carries a history containing a secret does not happen.
+A tool that returns a `Command` (a handoff, for example) has what it adds
+scanned: every field of each new message, other state keys and any `Send`
+payloads. Messages already in the agent's state are passed on without a second
+scan, so a handoff that carries the history works even after a reasoning-model
+turn. The id slots of a message (its id, tool call ids, response metadata) are
+checked for known secret patterns only, because provider ids look random. If a
+secret is found in what the tool adds, the whole Command is withheld and the
+model gets an error message instead.
 
 ## MCP servers (official Python SDK, 1.x and 2.x)
 

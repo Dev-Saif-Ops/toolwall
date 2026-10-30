@@ -42,11 +42,15 @@ same rules; the framework keeps running the tool.
   non-zero) reaches the model unscanned, because the SDK's failure hook can't
   replace it. Wrap your own SDK MCP tools with `wall.protect`, which scrubs
   exception text. The hooks read the context when the client connects.
-- LangChain: a tool returning a Command has every message in it scanned (text,
-  tool calls, state keys, and the payload of any `Send` in `goto`). Message and
-  call ids are checked for known secret patterns only, since provider ids look
-  random. One secret anywhere withholds the whole Command, so a handoff that
-  carries the full history fails closed if any message in it holds one.
+- LangChain: a tool returning a Command has what it adds scanned: every field of
+  each new message (text, tool calls and their arguments), other state keys, and
+  the payload of any `Send` in `goto`. Messages already in the agent's state (a
+  handoff passing the history on) were seen by the model and aren't scanned
+  again, so provider reasoning blobs in that history (thinking signatures,
+  encrypted reasoning) don't block it. The id slots of a message (message id,
+  tool call ids, response and usage metadata) are checked for known secret
+  patterns only, since provider ids look random. One secret in what the tool
+  adds withholds the whole Command.
 - Approvals live in memory for one run. Tickets that survive a restart are 0.7.
 
 ### Changed

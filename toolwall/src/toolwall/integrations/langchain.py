@@ -32,30 +32,50 @@ from langchain.agents.middleware import AgentMiddleware
 if TYPE_CHECKING:  # pragma: no cover
     from toolwall.wall import ToolWall
 
-# Framework- and provider-generated identifiers: high-entropy by nature, so the
-# entropy check would read every one as a secret. They are scanned for known
-# secret patterns only.
-_ID_KEYS = frozenset({"id", "tool_call_id", "response_metadata", "usage_metadata"})
+# Framework- and provider-generated identifiers are high-entropy by nature, so
+# the entropy check would read every one as a secret. Only the id slots of the
+# message schema are lifted out and scanned for known secret patterns; ids
+# inside tool arguments or state are scanned like any other value.
+_MESSAGE_ID_KEYS = ("id", "tool_call_id", "response_metadata", "usage_metadata")
+_CALL_LISTS = ("tool_calls", "invalid_tool_calls", "tool_call_chunks")
+_CALL_BLOCKS = frozenset({"tool_use", "tool_call", "server_tool_use"})
 
 
-def _split_ids(value: Any, ids: list[Any], depth: int = 0) -> Any:
-    """A plain copy of a message (or anything holding messages) with its id
-    fields moved into `ids`."""
-    if depth > 50:
-        raise ValueError("too deeply nested to scan")
-    if hasattr(value, "model_dump") and callable(value.model_dump):
-        value = value.model_dump()
-    if isinstance(value, dict):
-        out = {}
-        for k, v in value.items():
-            if k in _ID_KEYS:
-                ids.append(v)
-            else:
-                out[k] = _split_ids(v, ids, depth + 1)
-        return out
-    if isinstance(value, (list, tuple)):
-        return [_split_ids(v, ids, depth + 1) for v in value]
-    return value
+def _message_view(message: Any, ids: list[Any]) -> Any:
+    """A plain copy of one message with its schema id slots moved into `ids`."""
+    dump = message.model_dump() if callable(getattr(message, "model_dump", None)) else message
+    if not isinstance(dump, dict):
+        return dump  # tuple or str form: scanned whole
+    view = dict(dump)
+    for key in _MESSAGE_ID_KEYS:
+        if key in view:
+            ids.append(view.pop(key))
+    for key in _CALL_LISTS:
+        calls = view.get(key)
+        if isinstance(calls, list):
+            view[key] = [_lift_id(c, ids) for c in calls]
+    content = view.get("content")
+    if isinstance(content, list):
+        view["content"] = [_lift_id(b, ids) if isinstance(b, dict) and b.get("type") in _CALL_BLOCKS
+                           else b for b in content]
+    return view
+
+
+def _lift_id(item: Any, ids: list[Any]) -> Any:
+    if not isinstance(item, dict) or "id" not in item:
+        return item
+    item = dict(item)
+    ids.append(item.pop("id"))
+    return item
+
+
+def _same_message(a: Any, b: Any) -> bool:
+    if a is b:
+        return True
+    try:
+        return type(a) is type(b) and getattr(a, "id", None) is not None and a == b
+    except Exception:
+        return False
 
 
 class ToolWallMiddleware(AgentMiddleware):
@@ -109,14 +129,18 @@ class ToolWallMiddleware(AgentMiddleware):
         return self._scan_message(request, result)
 
     def _after_command(self, request: Any, command: Any) -> Any:
-        """A tool that returns a Command carries its messages in update: scan
-        those. Any other update shape is withheld rather than passed unscanned."""
+        """A tool that returns a Command carries messages in its update and in any
+        Send in goto: scan what the tool adds. Messages already in the agent's
+        state (a handoff passing the history on) were seen by the model already
+        and aren't scanned again. Any other update shape is withheld rather than
+        passed unscanned."""
         from langchain.messages import ToolMessage
 
+        seen = self._state_messages(request)
         goto = command.goto if isinstance(command.goto, (list, tuple)) else [command.goto]
-        sends = [g.arg for g in goto if hasattr(g, "arg") and hasattr(g, "node")]
-        if sends and not self._clean(request, sends):
-            return self._withheld_command(request, command)
+        for send in goto:
+            if hasattr(send, "arg") and hasattr(send, "node") and not self._send_clean(request, send.arg, seen):
+                return self._withheld_command(request, command)
         update = command.update
         if update is None:
             return command
@@ -139,25 +163,46 @@ class ToolWallMiddleware(AgentMiddleware):
             if isinstance(m, ToolMessage):
                 cleaned.append(self._scan_message(request, m))
                 continue
+            if any(_same_message(m, s) for s in seen):
+                cleaned.append(m)
+                continue
             # Every field the provider may send (content, tool_calls,
             # invalid_tool_calls...), not just the text.
-            if not self._clean(request, m):
+            ids: list[Any] = []
+            try:
+                view = _message_view(m, ids)
+            except Exception:
+                return self._withheld_command(request, command)
+            if not self._clean(request, view, ids):
                 return self._withheld_command(request, command)
             cleaned.append(m)
         return dataclasses.replace(command, update={**others, "messages": cleaned})
 
-    def _clean(self, request: Any, value: Any) -> bool:
-        """True when no secret is found in value: every field fully, ids for
-        known secret patterns only. Anything that can't be scanned is not clean."""
+    @staticmethod
+    def _state_messages(request: Any) -> list[Any]:
+        state = getattr(request, "state", None)
+        messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+        return list(messages) if isinstance(messages, (list, tuple)) else []
+
+    def _send_clean(self, request: Any, arg: Any, seen: list[Any]) -> bool:
+        """A Send payload: its new messages as messages, everything else whole."""
+        ids: list[Any] = []
+        if isinstance(arg, dict) and isinstance(arg.get("messages"), list):
+            try:
+                new = [_message_view(m, ids) for m in arg["messages"]
+                       if not any(_same_message(m, s) for s in seen)]
+            except Exception:
+                return False
+            arg = {**{k: v for k, v in arg.items() if k != "messages"}, "messages": new}
+        return self._clean(request, arg, ids)
+
+    def _clean(self, request: Any, view: Any, ids: list[Any]) -> bool:
+        """True when no secret is found: the view fully, the lifted ids for known
+        secret patterns only. Anything that can't be scanned is not clean."""
         from toolwall.shield import Shield
 
-        ids: list[Any] = []
-        try:
-            fields = _split_ids(value, ids)
-        except Exception:
-            return False
-        checked = self.wall.check_output(request.tool_call.get("name"), fields)
-        if checked.withheld or checked.value is not fields:
+        checked = self.wall.check_output(request.tool_call.get("name"), view)
+        if checked.withheld or checked.value is not view:
             return False
         shield = self.wall.gate.shield
         if shield is None or not ids:
