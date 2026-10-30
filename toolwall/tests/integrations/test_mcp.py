@@ -76,3 +76,17 @@ def test_no_context_means_no_refund():
     with pytest.raises(_tool_error()):
         call(server, {"order_id": "o_9", "amount": 40})
     assert ran == []
+
+
+def test_a_held_call_can_be_approved_and_then_runs_once():
+    ran = []
+    wall, server = make(ran)
+    with wall.context(customer_id="c_42"):
+        with pytest.raises(_tool_error()):
+            call(server, {"order_id": "o_9", "amount": 300})
+        ticket = wall.approvals.pending()[0].id
+        wall.approvals.approve(ticket, by="ops")
+        call(server, {"order_id": "o_9", "amount": 300})
+        with pytest.raises(_tool_error()):
+            call(server, {"order_id": "o_9", "amount": 300})
+    assert ran == [("o_9", 300)]

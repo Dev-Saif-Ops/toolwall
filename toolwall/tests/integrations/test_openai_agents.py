@@ -206,3 +206,18 @@ def test_approval_check_does_not_spend_the_budget():
     with wall.context(customer_id="c_42"):
         run(Agent(name="support", model=model, tools=[tool]))
     assert ran == [("o_9", 40)]  # needs_approval + guardrail took one slot, not two
+
+
+def test_a_ticket_approved_out_of_band_runs_without_another_pause():
+    ran = []
+    wall, tool = make(ran)
+    agent_model = ScriptedModel("issue_refund", {"order_id": "o_9", "amount": 300})
+    with wall.context(customer_id="c_42"):
+        result = run(Agent(name="support", model=agent_model, tools=[tool]))
+        assert result.interruptions and ran == []
+        ticket = wall.approvals.pending()[0].id
+        wall.approvals.approve(ticket, by="ops")
+        again = run(Agent(name="support", model=ScriptedModel("issue_refund", {"order_id": "o_9", "amount": 300}),
+                          tools=[tool]))
+    assert not again.interruptions and ran == [("o_9", 300)]
+    assert wall.approvals.get(ticket).status == "used"

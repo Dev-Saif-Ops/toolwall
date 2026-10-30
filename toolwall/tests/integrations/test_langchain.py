@@ -386,3 +386,17 @@ def test_tool_use_block_ids_on_a_new_message_get_the_pattern_check_only():
                                 "name": "x", "input": {}}], id="new4")
     cmd = Command(update={"messages": [ToolMessage(content="ok", tool_call_id="call_1"), added]})
     assert isinstance(_after_with_state(ToolWall(), cmd, []), Command)
+
+
+def test_a_ticket_approved_later_lets_the_next_run_through_without_pausing():
+    ran = []
+    wall, issue_refund, mw = make(ran)
+    with wall.context(customer_id="c_42"):
+        state = agent_for(scripted("issue_refund", {"order_id": "o_9", "amount": 300}),
+                          [issue_refund], mw).invoke({"messages": [("user", "refund")]}, config())
+        ticket = state["__interrupt__"][0].value["ticket"]
+        wall.approvals.approve(ticket, by="ops")
+        again = agent_for(scripted("issue_refund", {"order_id": "o_9", "amount": 300}),
+                          [issue_refund], mw).invoke({"messages": [("user", "refund")]}, config())
+    assert "__interrupt__" not in again and ran == [("o_9", 300)]
+    assert wall.approvals.get(ticket).status == "used"

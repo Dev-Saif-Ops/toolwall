@@ -44,8 +44,16 @@ if TYPE_CHECKING:  # pragma: no cover
     from toolwall.wall import ToolWall
 
 
-def pre_tool_use(wall: "ToolWall"):
-    """The PreToolUse callback on its own (async, SDK hook signature)."""
+def pre_tool_use(wall: "ToolWall", on_hold: str = "ask"):
+    """The PreToolUse callback on its own (async, SDK hook signature).
+
+    on_hold="ask" asks the user through the SDK's permission flow now.
+    on_hold="defer" ends the run instead (ResultMessage.deferred_tool_use): a
+    person approves the ticket later (wall.approvals.approve), and when you
+    resume the session the same call runs once.
+    """
+    if on_hold not in ("ask", "defer"):
+        raise ValueError('on_hold must be "ask" or "defer"')
 
     async def hook(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
         name = input_data.get("tool_name")
@@ -53,6 +61,11 @@ def pre_tool_use(wall: "ToolWall"):
         if not isinstance(name, str) or not isinstance(args, dict):
             return _decision(input_data, "deny", "The arguments for this call could not be read.")
         decision = wall.decide(name, args)
+        if decision.needs_approval and on_hold == "defer":
+            if decision.ticket is None:
+                # Nothing a person could approve later: don't leave it hanging.
+                return _decision(input_data, "deny", decision.reason)
+            return _decision(input_data, "defer", f"{decision.reason} Ticket: {decision.ticket}")
         if decision.needs_approval:
             decision_slot = wall.take_slot(decision)
             if decision_slot.denied:
@@ -100,12 +113,12 @@ def post_tool_use(wall: "ToolWall"):
     return hook
 
 
-def hooks(wall: "ToolWall", matcher: str | None = None) -> dict[str, list[Any]]:
+def hooks(wall: "ToolWall", matcher: str | None = None, on_hold: str = "ask") -> dict[str, list[Any]]:
     """ClaudeAgentOptions(hooks=hooks(wall)): PreToolUse and PostToolUse."""
     from claude_agent_sdk import HookMatcher
 
     return {
-        "PreToolUse": [HookMatcher(matcher=matcher, hooks=[pre_tool_use(wall)])],
+        "PreToolUse": [HookMatcher(matcher=matcher, hooks=[pre_tool_use(wall, on_hold)])],
         "PostToolUse": [HookMatcher(matcher=matcher, hooks=[post_tool_use(wall)])],
     }
 

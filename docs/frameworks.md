@@ -96,6 +96,11 @@ with the reason. An ask becomes `"ask"`, so the SDK asks the user through your
 no decision, so your permission mode and rules still apply. When the wall
 redacted a secret in the arguments (`ToolWall(redact=True)`), the clean
 arguments go to the tool and to the person approving.
+
+`hooks(wall, on_hold="defer")` ends the run on a held call instead of asking
+(`ResultMessage.deferred_tool_use`). A person approves the ticket
+(`wall.approvals.approve`), you resume the session, and the same call runs
+once. See [approvals.md](approvals.md).
 A `PostToolUse` hook replaces secrets in the output with placeholders and keeps
 the output's shape. The SDK ignores a replacement that doesn't match a
 built-in tool's output shape, so withholding would leak.
@@ -127,7 +132,7 @@ agent = create_agent(model, [issue_refund], middleware=[ToolWallMiddleware(wall)
 config = {"configurable": {"thread_id": "t1"}}
 with wall.context(customer_id="c_42"):
     state = agent.invoke({"messages": [("user", "refund order o_9")]}, config)
-    if "__interrupt__" in state:          # {"toolwall": "approval", "tool", "args", "reason"}
+    if "__interrupt__" in state:          # {"toolwall": "approval", "tool", "args", "reason", "ticket"}
         state = agent.invoke(Command(resume=True), config)   # False declines
 ```
 
@@ -213,5 +218,6 @@ if decision.needs_approval and person_says_yes():
 - The wall sees what a tool returns, not what its code writes elsewhere. A tool
   that changes the agent's state in place (or writes to a database) is outside
   what an output check can see.
-- Approvals happen in memory, inside one run. Approval tickets that survive a
-  restart are planned for 0.7.
+- A framework's own approval (the SDK's resume, a LangGraph interrupt) lives
+  as long as that run. To approve later, after a restart or from another
+  process, use approval tickets: [approvals.md](approvals.md).

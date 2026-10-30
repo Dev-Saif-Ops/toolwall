@@ -54,3 +54,13 @@ class context:
 
     async def __aexit__(self, *exc: object) -> None:
         self.__exit__(*exc)
+
+
+class exactly(context):
+    """Like context(), but replaces the context in effect instead of adding to
+    it: an approved ticket runs in exactly the context it was approved in."""
+
+    def __enter__(self) -> Mapping[str, Any]:
+        values = MappingProxyType(dict(self._values))
+        self._tokens.append(_current.set(values))
+        return values

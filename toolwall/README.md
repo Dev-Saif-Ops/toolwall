@@ -237,6 +237,26 @@ scrubbed too; see the guide). Install with
 `mcp`, `integrations` for all).
 Full guide: [docs/frameworks.md](https://github.com/Dev-Saif-Ops/toolwall/blob/main/docs/frameworks.md).
 
+## Approvals that bind the exact call
+
+```python
+from toolwall import Approvals, SQLiteStore
+
+wall = ToolWall(approvals=Approvals(SQLiteStore("approvals.db")))
+with wall.context(customer_id="c_42"):
+    held = wall.call("issue_refund", {"order_id": "o_9", "amount": 350})
+held.ticket                                           # "tkt_6f72..."
+
+wall.approvals.approve(held.ticket, by="ops@ourco.com")   # or: python -m toolwall approvals ...
+wall.run_approved(held.ticket)                        # those arguments, that customer, once
+```
+
+The ticket is bound to the exact arguments and the customer the agent was
+serving. A changed amount, another customer, a replay, an expired or edited
+ticket never runs. Inside a framework, the same call coming back after approval
+runs once without pausing again (Claude Agent SDK: `hooks(wall, on_hold="defer")`).
+Full guide: [docs/approvals.md](https://github.com/Dev-Saif-Ops/toolwall/blob/main/docs/approvals.md).
+
 ## Guard an MCP server
 
 ```python

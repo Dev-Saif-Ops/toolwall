@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.7.0] - unreleased
+
+Approvals that bind the exact call: a held call gets a ticket, a person approves
+it later, and exactly that call runs, once.
+
+### Added
+- `toolwall.approvals`: `Approvals`, `Ticket`, `TicketError`, `MemoryStore`
+  (the default) and `SQLiteStore` (stdlib; survives restarts, shared by
+  processes on one machine). `ToolWall(approvals=...)`; `approvals=False` turns
+  tickets off.
+- A held call nobody can approve on the spot opens a ticket bound to the tool,
+  the arguments and the request context. `GateResult.ticket`,
+  `Decision.ticket`, `ToolBlocked.ticket`.
+- `wall.approvals.approve(id, by=, note=)`, `deny(...)`, `pending()`, `get(id)`.
+- `wall.run_approved(id)` / `arun_approved(id)`: runs the ticket's arguments in
+  the ticket's context, once. Every other check runs again first.
+- The same call, in the same context, coming back after approval (an agent
+  retrying, a framework resuming) runs once on the ticket. A denied ticket
+  declines it.
+- Claude Agent SDK: `hooks(wall, on_hold="defer")` ends the run on a held call;
+  resume after approving the ticket. The LangChain interrupt carries the ticket.
+- `python -m toolwall approvals list|show|approve|deny --db FILE`: a CLI approver
+  for a SQLite store.
+- `examples/approval_tickets.py` and `docs/approvals.md`.
+
+### Security notes
+- A ticket covers exactly one call: a different amount (including `300` vs
+  `300.0`), another order or another customer's context doesn't match.
+- A ticket runs once, under concurrency (an atomic status change in the store).
+- Expired, denied, used or edited tickets never run. An edited ticket is refused
+  before anything is called.
+- The store is trusted: anyone who can write to it can approve a ticket.
+
+### Known limits
+- Ticket arguments and context values must be plain JSON values. A call that
+  can't be stored stays held, without a ticket.
+- `rules` and lookups are re-run when a ticket runs; a lookup that changed its
+  answer since approval blocks the call (the ticket stays approved).
+
 ## [0.6.0] - 2026-10-30
 
 ToolWall plugs into the agent frameworks that run tools themselves. Same wall,

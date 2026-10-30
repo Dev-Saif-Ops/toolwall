@@ -138,6 +138,7 @@ class GateResult:
     receipt_spent: bool = False  # one verdict authorises one execution, not a stream
     kind: str | None = None  # why it was blocked or held; drives model_reason
     arg: str | None = None  # the argument a schema/policy block was about, if one
+    ticket: str | None = None  # approval ticket for a held call, when one was opened
 
     @property
     def model_reason(self) -> str | None:
@@ -222,6 +223,10 @@ class Gate:
         self.meter = meter
         self.shield = shield
         self.approval = approval
+        # Approval tickets (toolwall.approvals), set by ToolWall: an approved
+        # ticket for exactly this call grants it; a held call nobody can approve
+        # now gets a pending ticket.
+        self.tickets: Any = None
         self.dry_run = dry_run
         self.lane = lane
         self.history: list[GateResult] = []  # every checked result, for reports/suggest
@@ -721,6 +726,9 @@ class Gate:
         An async handler cannot be asked from here: its coroutine is truthy, and
         reading it as "granted" would approve every call. It is refused, closed.
         """
+        ticketed = self._resolve_ticket(result)
+        if ticketed is not None:
+            return ticketed
         if self.approval is None:
             return self._approval_unavailable(result)
         try:
@@ -736,6 +744,9 @@ class Gate:
 
     async def _aresolve_approval(self, result: GateResult) -> GateResult:
         """_resolve_approval() for the async path: an async handler is awaited."""
+        ticketed = self._resolve_ticket(result)
+        if ticketed is not None:
+            return ticketed
         if self.approval is None:
             return self._approval_unavailable(result)
         try:
@@ -752,9 +763,41 @@ class Gate:
             return self._approval_failed(result, "approval handler returned an awaitable: fails closed")
         return self._approval_decided(result, bool(granted))
 
+    def _resolve_ticket(self, result: GateResult) -> GateResult | None:
+        """A held call with an approved ticket for exactly this call and context
+        runs (once); one with a denied ticket is declined. None: no ticket says."""
+        if self.tickets is None or result.call is None:
+            return None
+        try:
+            from toolwall import context as _context
+
+            ticket = self.tickets.lookup(result.call.name, result.call.args, dict(_context.current()))
+        except Exception as exc:
+            return self._approval_failed(result, f"approval ticket check raised {type(exc).__name__}: fails closed")
+        if ticket is None:
+            return None
+        result.ticket = ticket.id
+        if ticket.status == "denied":
+            return self._approval_decided(result, False)
+        if ticket.status == "approved":
+            if self.tickets.redeem(ticket):
+                return self._approval_decided(result, True)
+            return self._approval_failed(result, "approval ticket was already used or expired")
+        return None  # pending: ask the handler, or stay held
+
     def _approval_unavailable(self, result: GateResult) -> GateResult:
-        # Held for good: there is no approve-later path, so nothing may run it.
+        # Nothing may run it now. With tickets, a person can approve it later:
+        # the same call then runs once, through the ticket.
         self._issued.pop(id(result), None)
+        if self.tickets is not None and result.call is not None and result.ticket is None:
+            try:
+                from toolwall import context as _context
+
+                ticket = self.tickets.open(result.call.name, result.call.args,
+                                           dict(_context.current()), "; ".join(result.reasons) or None)
+                result.ticket = ticket.id
+            except Exception:
+                pass  # can't be held for later: it stays held, with no ticket
         return result
 
     def _approval_failed(self, result: GateResult, reason: str) -> GateResult:

@@ -335,6 +335,26 @@ scrubbed too; see the guide). Install with
 `mcp`, `integrations` for all).
 Full guide: [docs/frameworks.md](docs/frameworks.md).
 
+### 6. Approvals that bind the exact call
+
+```python
+from toolwall import Approvals, SQLiteStore
+
+wall = ToolWall(approvals=Approvals(SQLiteStore("approvals.db")))
+with wall.context(customer_id="c_42"):
+    held = wall.call("issue_refund", {"order_id": "o_9", "amount": 350})
+held.ticket                                           # "tkt_6f72..."
+
+wall.approvals.approve(held.ticket, by="ops@ourco.com")   # or: python -m toolwall approvals ...
+wall.run_approved(held.ticket)                        # those arguments, that customer, once
+```
+
+The ticket is bound to the exact arguments and the customer the agent was
+serving. A changed amount, another customer, a replay, an expired or edited
+ticket never runs. Inside a framework, the same call coming back after approval
+runs once without pausing again (Claude Agent SDK: `hooks(wall, on_hold="defer")`).
+Full guide: [docs/approvals.md](docs/approvals.md).
+
 ## Examples
 
 Runnable from a clone of this repo (`cd toolwall`):
@@ -344,6 +364,7 @@ Runnable from a clone of this repo (`cd toolwall`):
 | [`examples/quickstart.py`](toolwall/examples/quickstart.py) | Six gated scenarios: allow, unknown tool, out-of-range, empty-filter delete, approval hold, secret block | No |
 | [`examples/dangerous_agent_demo.py`](toolwall/examples/dangerous_agent_demo.py) | An off-the-rails agent replayed with vs without the gate: table wiped and secrets leaked ungated, all stopped gated | No |
 | [`examples/mcp_guard_demo.py`](toolwall/examples/mcp_guard_demo.py) | The same gate in front of an MCP-style server: only the safe call reaches it | No |
+| [`examples/approval_tickets.py`](toolwall/examples/approval_tickets.py) | A refund held on a ticket, approved, run once; a replay, a bigger amount and an edited ticket all refused | No |
 | [`examples/live_gemini_agent.py`](toolwall/examples/live_gemini_agent.py) | A **real Gemini agent** using native function calling; toolwall allows the safe query, holds a destructive delete for approval, and blocks a secret leaving via email | `GEMINI_API_KEY` |
 
 ```bash

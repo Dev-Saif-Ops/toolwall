@@ -5,6 +5,7 @@ toolwall guarantees they're allowed.
 """
 
 from toolwall.gate import Gate, GateResult, ToolRegistry, Verdict
+from toolwall.approvals import Approvals, MemoryStore, SQLiteStore, Ticket, TicketError
 from toolwall.wall import Decision, OutputCheck, ToolBlocked, ToolWall
 from toolwall import context, rules
 from toolwall.intake import IntakeError, ToolCall, parse_tool_calls
@@ -30,6 +31,11 @@ __version__ = "0.6.0"
 
 __all__ = [
     "ToolWall",
+    "Approvals",
+    "MemoryStore",
+    "SQLiteStore",
+    "Ticket",
+    "TicketError",
     "Decision",
     "OutputCheck",
     "ToolBlocked",

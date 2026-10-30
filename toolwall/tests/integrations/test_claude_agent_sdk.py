@@ -123,3 +123,27 @@ def test_held_call_in_redact_mode_hands_on_the_redacted_arguments():
     spec = out["hookSpecificOutput"]
     assert spec["permissionDecision"] == "ask"
     assert AWS_KEY not in spec["updatedInput"]["text"]
+
+
+def test_defer_ends_the_run_and_the_approved_ticket_runs_once_on_resume():
+    wall = make()
+    hook = pre_tool_use(wall, on_hold="defer")
+    data = {"hook_event_name": "PreToolUse", "tool_name": TOOL,
+            "tool_input": {"order_id": "o_9", "amount": 300}}
+    with wall.context(customer_id="c_42"):
+        first = asyncio.run(hook(data, "tu_1", None))
+        assert verdict(first) == "defer"
+        ticket = wall.approvals.pending()[0].id
+        assert ticket in first["hookSpecificOutput"]["permissionDecisionReason"]
+        wall.approvals.approve(ticket, by="ops")
+        assert asyncio.run(hook(data, "tu_1", None)) == {}          # resumed: runs
+        assert verdict(asyncio.run(hook(data, "tu_1", None))) == "defer"  # used up
+
+
+def test_defer_without_a_ticket_denies():
+    wall = ToolWall(approvals=False)
+    wall.rule(TOOL, schema=ToolSchema(required=["order_id"]), require_approval=True)
+    out = pre(wall, {"order_id": "o_9"})
+    assert verdict(out) == "ask"
+    data = {"hook_event_name": "PreToolUse", "tool_name": TOOL, "tool_input": {"order_id": "o_9"}}
+    assert verdict(asyncio.run(pre_tool_use(wall, on_hold="defer")(data, "tu", None))) == "deny"

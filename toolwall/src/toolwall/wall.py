@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from toolwall import context as _context
+from toolwall.approvals import Approvals, TicketError
 from toolwall.gate import ApprovalHandler, DefaultMode, Gate, GateResult, Verdict
 from toolwall._aio import is_async_callable
 from toolwall.intake import ToolCall
@@ -42,7 +43,9 @@ class Decision:
     verdict: "allow" (run it, with `args`), "deny" (don't), or "ask" (a person
     must approve first). `reason` is safe to show the model; `detail` is the full
     reason for your logs (secrets scrubbed). `args` are the arguments as checked,
-    redacted if the wall redacts secrets: run these, not the originals.
+    redacted if the wall redacts secrets: run these, not the originals. `ticket`
+    is the approval ticket for an "ask" (approve it with wall.approvals), or the
+    ticket an "allow" used up.
     """
 
     verdict: Literal["allow", "deny", "ask"]
@@ -51,6 +54,7 @@ class Decision:
     reason: str | None = None
     detail: str | None = None
     receipt: str | None = None
+    ticket: str | None = None
 
     @property
     def allowed(self) -> bool:
@@ -81,7 +85,9 @@ class OutputCheck:
 
 class ToolBlocked(Exception):
     """Raised by @wall.protect when the wall blocks or holds a call. Its message is
-    the model-safe reason."""
+    the model-safe reason; `ticket` is the approval ticket for a held call."""
+
+    ticket: str | None = None
 
 
 def _bind(fn: ToolFn, args: tuple, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -113,6 +119,9 @@ class ToolWall:
         redact: if detecting secrets, redact instead of block.
         audit: attach a Meter so every verdict is recorded and exportable.
         approval: handler called when a tool needs approval; return True to run.
+        approvals: where approval tickets are kept (toolwall.approvals.Approvals);
+            a ticket per held call, in memory, by default. approvals=False turns
+            tickets off.
     """
 
     def __init__(
@@ -123,10 +132,15 @@ class ToolWall:
         redact: bool = False,
         audit: bool = True,
         approval: ApprovalHandler | None = None,
+        approvals: Approvals | Literal[False] | None = None,
     ):
         shield = Shield(mode="redact" if redact else "block") if detect_secrets else None
         meter = Meter() if audit else None
         self.gate = Gate(default=default, meter=meter, shield=shield, approval=approval)
+        self.approvals: Approvals | None = (
+            None if approvals is False else approvals if approvals is not None else Approvals()
+        )
+        self.gate.tickets = self.approvals
 
     # -- setup (chainable) ---------------------------------------------------
 
@@ -230,6 +244,33 @@ class ToolWall:
         """
         return await self.gate.arun({"name": name, "args": args or {}})
 
+    def run_approved(self, ticket_id: str) -> GateResult:
+        """Run the call an approved ticket holds: its arguments, in its context,
+        once. Every other check runs again first (rules see the ticket's context;
+        a rule that now fails still blocks). Raises TicketError when the ticket
+        isn't approved, has expired or was already used."""
+        ticket = self._approved_ticket(ticket_id)
+        with _context.exactly(**ticket.context):
+            return self.call(ticket.tool, ticket.args)
+
+    async def arun_approved(self, ticket_id: str) -> GateResult:
+        """run_approved() for async tools."""
+        ticket = self._approved_ticket(ticket_id)
+        with _context.exactly(**ticket.context):
+            return await self.acall(ticket.tool, ticket.args)
+
+    def _approved_ticket(self, ticket_id: str) -> Any:
+        if self.approvals is None:
+            raise TicketError("approval tickets are off for this wall")
+        ticket = self.approvals.get(ticket_id)
+        if ticket is None:
+            raise TicketError(f"no ticket {ticket_id!r}")
+        if ticket.status != "approved":
+            raise TicketError(f"ticket {ticket_id!r} is {ticket.status}, not approved")
+        if not self.approvals._intact(ticket, ticket.digest):
+            raise TicketError(f"ticket {ticket_id!r} was changed after it was opened")
+        return ticket
+
     def decide(self, name: str, args: dict[str, Any] | None = None) -> Decision:
         """Verdict for a call your framework will run itself: allow, deny or ask.
 
@@ -249,16 +290,21 @@ class ToolWall:
         call = ToolCall(name=decision.tool, args=dict(decision.args))
         reason = self.gate._reserve_budget(call)
         if reason is None:
-            return Decision("allow", decision.tool, decision.args, None, decision.detail, decision.receipt)
+            return Decision("allow", decision.tool, decision.args, None, decision.detail,
+                            decision.receipt, decision.ticket)
         probe = GateResult(Verdict.BLOCK, call, [reason], kind="budget")
         self.gate._record(probe)
-        return Decision("deny", decision.tool, decision.args, probe.model_reason, reason, decision.receipt)
+        return Decision("deny", decision.tool, decision.args, probe.model_reason, reason,
+                        decision.receipt, decision.ticket)
 
     def _decide(self, name: str, args: dict[str, Any] | None, *, reserve: bool) -> Decision:
         result = self.gate.check({"name": name, "args": args or {}})
         # The gate isn't going to run this result, so it must not hold an issue record.
         self.gate._issued.pop(id(result), None)
-        if result.allowed and reserve:
+        ticket_id: str | None = None
+        if result.needs_approval and self.approvals is not None and result.call is not None:
+            result, ticket_id = self._decide_ticket(result, reserve=reserve)
+        elif result.allowed and reserve:
             budget_reason = self.gate._reserve_budget(result.call)
             if budget_reason is not None:
                 result = self.gate._refuse(result, budget_reason, kind="budget")
@@ -272,7 +318,49 @@ class ToolWall:
             reason=result.model_reason,
             detail="; ".join(result.reasons) or None,
             receipt=result.receipt,
+            ticket=ticket_id,
         )
+
+    def _decide_ticket(self, result: GateResult, *, reserve: bool) -> tuple[GateResult, str | None]:
+        """A held call and its ticket: an approved ticket for exactly this call and
+        context lets it run (used up only when reserve=True; a probe just looks), a
+        denied one declines it, and otherwise the call waits on a pending ticket."""
+        assert self.approvals is not None and result.call is not None
+        ctx = dict(_context.current())
+        try:
+            ticket = self.approvals.lookup(result.call.name, result.call.args, ctx)
+        except TicketError:
+            return result, None  # can't be bound to a ticket: held, no ticket
+        if ticket is not None and ticket.status == "approved":
+            if not reserve:
+                return self._granted(result), ticket.id
+            budget_reason = self.gate._reserve_budget(result.call)
+            if budget_reason is not None:
+                return self.gate._refuse(result, budget_reason, kind="budget"), ticket.id
+            if self.approvals.redeem(ticket):
+                granted = self._granted(result)
+                self.gate._record_transition(granted, "approval-granted")
+                return granted, ticket.id
+            ticket = None  # used up meanwhile: this call needs a new approval
+        if ticket is not None and ticket.status == "denied":
+            declined = self.gate._refuse(result, "approval denied", kind="approval_denied")
+            return declined, ticket.id
+        if ticket is None:
+            try:
+                ticket = self.approvals.open(result.call.name, result.call.args, ctx,
+                                             "; ".join(result.reasons) or None)
+            except TicketError:
+                return result, None
+        return result, ticket.id
+
+    @staticmethod
+    def _granted(result: GateResult) -> GateResult:
+        import copy
+
+        granted = copy.copy(result)
+        granted.verdict = Verdict.ALLOW
+        granted.reasons = []
+        return granted
 
     async def adecide(self, name: str, args: dict[str, Any] | None = None) -> Decision:
         """decide() for async code. Rules are synchronous, so this does not await them."""
@@ -334,7 +422,12 @@ class ToolWall:
 
             def outcome(result: GateResult) -> Any:
                 if not result.allowed or result.error is not None:
-                    raise make_error(result.model_reason or "This call can't be run.")
+                    exc = make_error(result.model_reason or "This call can't be run.")
+                    try:
+                        exc.ticket = result.ticket  # type: ignore[attr-defined]
+                    except AttributeError:
+                        pass
+                    raise exc
                 return result.return_value
 
             if is_async_callable(f):

@@ -12,9 +12,11 @@ Around every tool call:
 - "deny": the tool doesn't run; the model gets a ToolMessage (status "error")
   with the model-safe reason.
 - "ask": the run pauses with a LangGraph interrupt carrying
-  {"toolwall": "approval", "tool", "args", "reason"}. Resume with
+  {"toolwall": "approval", "tool", "args", "reason", "ticket"}. Resume with
   Command(resume=True) to approve or Command(resume=False) to decline. Approving
-  takes the budget slot. Interrupts need a checkpointer.
+  takes the budget slot. Interrupts need a checkpointer. Or approve the ticket
+  later (wall.approvals.approve) and run the agent again: the same call, in the
+  same context, then runs once without pausing.
 - "allow": the tool runs (with the wall's redacted arguments, if it redacted a
   secret), and its output is scanned before the model sees it, including the
   messages in a Command a tool returns.
@@ -105,7 +107,7 @@ class ToolWallMiddleware(AgentMiddleware):
 
             approved = interrupt({
                 "toolwall": "approval", "tool": name, "args": dict(decision.args),
-                "reason": decision.reason,
+                "reason": decision.reason, "ticket": decision.ticket,
             })
             if approved is not True:
                 return None, ToolMessage(content="A person declined this call.",
