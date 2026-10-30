@@ -4,6 +4,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/toolwall.svg)](https://pypi.org/project/toolwall/)
 [![License: MIT](https://img.shields.io/pypi/l/toolwall.svg)](toolwall/LICENSE)
 [![CI](https://github.com/Dev-Saif-Ops/toolwall/actions/workflows/ci.yml/badge.svg)](https://github.com/Dev-Saif-Ops/toolwall/actions/workflows/ci.yml)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16097/badge)](https://www.bestpractices.dev/projects/16097)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](toolwall/pyproject.toml)
 [![Failure suite](https://img.shields.io/badge/attack%20suite-35%2F35%20blocked-brightgreen.svg)](gate-suite/results/REPORT.md)
 
