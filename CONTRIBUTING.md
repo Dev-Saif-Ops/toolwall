@@ -48,7 +48,7 @@ CI also runs a linter and a static security analyser on the library; run them
 before opening a pull request:
 
 ```bash
-pip install ruff bandit
+pip install ruff==0.17.3 bandit==1.9.4
 ruff check toolwall/src --select E,F,W,B --ignore E501
 bandit -r toolwall/src
 ```

@@ -167,7 +167,7 @@ class GateResult:
             "schema": f"The arguments don't match what this tool accepts{(' (check' + where + ')') if where else ''}.",
             "policy": (f"The value for{where} isn't allowed for this call." if where
                        else "This call isn't allowed by policy."),
-            "secret": "The arguments contain what looks like a secret. Remove it and try again.",  # nosec B105
+            "secret": "The arguments contain what looks like a secret. Remove it and try again.",  # nosec B105 (a message for the model, not a credential)
             "budget": "The limit for calls to this tool has been reached.",
             "approval_denied": "A person declined this call.",
             "decide_only": "This call can't be run here.",

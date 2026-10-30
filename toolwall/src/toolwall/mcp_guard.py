@@ -134,7 +134,7 @@ def build_stdio_guard(gate: Gate, upstream_command: list[str]):  # pragma: no co
     which is fully tested without an MCP install.
     """
     try:
-        import mcp  # noqa: F401
+        import mcp  # noqa: F401 (only checks that the optional mcp package is installed)
     except ImportError as exc:
         raise SystemExit(
             "toolwall-mcp needs the MCP extra: pip install 'toolwall[mcp]'"
