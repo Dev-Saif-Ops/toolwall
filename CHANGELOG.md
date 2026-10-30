@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.4.3] - unreleased
+## [0.4.3] - 2026-10-30
 
 Fixes from an adoption audit that walked the path a new user takes into a real,
 async agent framework. Every fix has a test that fails on 0.4.2.

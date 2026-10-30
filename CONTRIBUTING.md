@@ -51,8 +51,8 @@ cd gate-suite
 python run_suite.py
 ```
 
-Currently 28/28 attack cases blocked with zero executions, and every clean case
-executes. **A change that blocks legitimate traffic fails the suite just as hard
+Currently 35/35 attack cases blocked with zero executions, and every one of the
+14 clean cases executes. **A change that blocks legitimate traffic fails the suite just as hard
 as one that lets an attack through.** False blocks are the main reason security
 tooling gets removed.
 
