@@ -14,15 +14,23 @@ requires-python = ">=3.10"
 authors = [{ name = "Mohammad Safwan Athar" }]
 keywords = [
     "ai", "agents", "ai-agents", "llm", "llm-security", "ai-agent-security",
-    "agent-security", "tool-calling", "tool-call-validation", "guardrails",
-    "security", "ai-safety", "mcp", "mcp-security", "mcp-firewall", "mcp-proxy",
-    "prompt-injection", "secret-detection", "agent-sandbox", "firewall",
+    "agent-security", "tool-calling", "function-calling", "tool-call-validation",
+    "guardrails", "human-in-the-loop", "approval", "policy", "security", "ai-safety",
+    "mcp", "mcp-security", "prompt-injection", "secret-detection", "asyncio",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Framework :: AsyncIO",
+    "Typing :: Typed",
     "Topic :: Software Development :: Libraries",
     "Topic :: Security",
 ]
@@ -36,7 +44,12 @@ dev = ["pytest>=8.0", "pytest-cov>=4.0"]
 toolwall = "toolwall.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Dev-Saif-Ops/toolwall"
+Homepage = "https://toolwall.aya-ai.xyz"
+Documentation = "https://github.com/Dev-Saif-Ops/toolwall#readme"
+Source = "https://github.com/Dev-Saif-Ops/toolwall"
+Changelog = "https://github.com/Dev-Saif-Ops/toolwall/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Dev-Saif-Ops/toolwall/issues"
+"Security policy" = "https://github.com/Dev-Saif-Ops/toolwall/blob/main/SECURITY.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/toolwall"]
