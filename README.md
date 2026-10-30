@@ -12,7 +12,7 @@
 > Your support agent can call `issue_refund()`. toolwall decides how much, for which
 > customer, and when a person has to approve, before the call runs.
 
-**Status: v0.5.0 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 420 tests in CI on Python 3.10–3.13 · published attack suite · zero dependencies.**
+**Status: v0.5.0 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 447 tests in CI on Python 3.10–3.13 · published attack suite · zero dependencies.**
 
 ```bash
 pip install toolwall
@@ -142,7 +142,7 @@ Everything that isn't explicitly allowed is blocked. That is the whole idea.
 ## Features
 
 - **Fail-closed by default**: unknown tool, bad schema, policy violation, budget hit, or unparseable payload all block *before* the tool runs. Registration is the allowlist.
-- **Business rules** (`toolwall.rules`): `at_most`, `between`, `positive`, `one_of`, `owned_by` (the record belongs to the customer the agent serves), `equals_context`, `email_domain`, `sql_readonly`, `path_under`, `url_host`, composed with `&`, `|` and `~`. Strict by design: `"40"` is not a number, `True` is not `1`, and a rule that needs context fails when it isn't set.
+- **Business rules** (`toolwall.rules`): `at_most`, `between`, `positive`, `one_of`, `owned_by` (the record belongs to the customer the agent serves), `equals_context`, `email_domain`, `sql_readonly`, `path_under`, `url_host`, composed with `&`, `|` and `~`. Strict by design: `"40"` is not a number, `True` is not `1`, and a rule that needs context blocks when it isn't set, even negated.
 - **Request context**: `with wall.context(customer_id=...)` makes the customer visible to rules in this thread or asyncio task only. The audit records which keys were set, never their values.
 - **Approvals that bind the exact call**: `ask_if=r.over("amount", 200)` holds a call for a person; the call that runs after approval is the one that was checked.
 - **Verdicts for any framework**: `decide()` returns allow / deny / ask for a tool your framework runs, and `check_output()` scans what it returned. Model-facing reasons name the argument, never the rule.
@@ -325,7 +325,7 @@ Run the tests and the published attack suite yourself:
 
 ```bash
 cd toolwall && pip install -e ".[dev]"
-pytest                                    # 420 tests
+pytest                                    # 447 tests
 python ../gate-suite/run_suite.py         # 35/35 attacks blocked, prints the G1 report
 ```
 

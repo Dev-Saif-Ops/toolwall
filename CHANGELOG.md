@@ -34,7 +34,7 @@ person. Everything from 0.4.x keeps working.
 
 ### Changed
 - README leads with the support-agent example.
-- 300 to 420 tests.
+- 300 to 447 tests.
 
 ### Security notes
 - A rule or lookup that returns an awaitable (or a generator or Future) fails
@@ -45,12 +45,18 @@ person. Everything from 0.4.x keeps working.
   backslash escapes) and about where a statement ends, and a second statement
   hides in exactly those disagreements. So outside `'...'` and `"..."` (with
   doubled quotes) only plain ASCII identifiers, numbers, operators and spaces are
-  allowed: comments, `$`, `#`, `\`, brackets, backticks, `\r` and NUL are refused.
-  Ordinary reads fit; anything else is a false block, by design. It does not know
+  allowed: comments, `$`, `#`, `@`, `:`, `\`, brackets, backticks, `\r`, NUL and
+  non-ASCII outside quotes are refused. SQL Server needs no `;` between statements,
+  so its statement verbs (`SHUTDOWN`, `KILL`, `BACKUP`, `DBCC`, `WAITFOR`, `BEGIN`...)
+  are refused anywhere. Ordinary reads fit; anything else is a false block, by
+  design (including Postgres `::` casts, MySQL backticks and `@vars`, and columns
+  named like a write keyword). It does not know
   which functions have side effects (`pg_sleep`, `nextval`, `lo_import`,
   `dblink_exec`...): pair it with a read-only database role.
 - `path_under()` matches its deny list case-insensitively (`.ENV` opens `.env` on
   macOS and Windows) and follows symlinks before checking the root.
+- A rule that reads the request context raises when its key is unset, so it blocks
+  even under `~`: no context, no permission, negated or not.
 - Model-facing reasons name an argument only when its name is a plain identifier
   (letters, digits, underscore) of up to 40 characters; otherwise they say "an
   argument".

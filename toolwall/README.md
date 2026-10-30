@@ -155,7 +155,8 @@ Everything not explicitly allowed is blocked. That is the whole idea.
 - **Business rules** (`toolwall.rules`): `at_most`, `between`, `positive`, `one_of`,
   `owned_by`, `equals_context`, `email_domain`, `sql_readonly`, `path_under`,
   `url_host`, composed with `&`, `|` and `~`. Strict: `"40"` is not a number and `True`
-  is not `1`. A rule that needs request context fails when it isn't set.
+  is not `1`. A rule that needs request context blocks when it isn't set, even
+  negated.
 - **Request context**: `wall.context(customer_id=...)`, visible to rules in this thread
   or asyncio task only. The audit records the keys, never the values.
 - **Approvals** with `ask_if=r.over("amount", 200)`, bound to the exact call checked.

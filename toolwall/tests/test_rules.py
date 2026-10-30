@@ -49,7 +49,8 @@ def test_one_of_is_type_exact():
 def test_equals_context_reads_the_current_context():
     wall = ToolWall()
     rule = r.equals_context("customer_email")
-    assert not rule("amal@example.com")  # no context set: fail closed
+    with pytest.raises(LookupError):  # no context set: raise, which the policy blocks
+        rule("amal@example.com")
     with wall.context(customer_email="amal@example.com"):
         assert rule("amal@example.com")
         assert not rule("other@example.com")
@@ -71,7 +72,8 @@ def test_owned_by_checks_the_lookup_against_context():
         assert rule("o_9")
         assert not rule("o_77")
         assert not rule("o_missing")  # lookup returns None: not owned
-    assert not rule("o_9")  # no context: fail closed
+    with pytest.raises(LookupError):  # no context: raise, which the policy blocks
+        rule("o_9")
 
 
 def test_owned_by_fails_closed_on_lookup_errors_and_async_lookups():
@@ -416,3 +418,86 @@ def test_rule_returning_a_lazy_value_fails_closed():
 def test_decimal_infinity_is_not_a_number():
     assert not r.positive()(Decimal("Infinity"))
     assert not r.at_least(0)(Decimal("Infinity"))
+
+
+# --- critic round 3 (0.5) ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT @a('); DROP TABLE orders; SELECT @a(')",
+    "SELECT :a('); DELETE FROM orders; SELECT :a(')",
+    "WITH x AS (SELECT @a(')) DELETE FROM orders WHERE 1 OR @a(')",
+    'SELECT @a("); DROP TABLE orders; SELECT @a(")',
+    "SELECT created::date FROM t",          # Postgres cast: refused with ':' (documented)
+    "SELECT 1 SHUTDOWN WITH NOWAIT",
+    "SELECT 1 KILL 52",
+    "SELECT 1 BACKUP DATABASE shop TO DISK = 'x.bak'",
+    "SELECT 1 DENY SELECT ON orders TO app_user",
+    "SELECT 1 DBCC SHRINKDATABASE(shop)",
+    "SELECT 1 WAITFOR DELAY '01:00:00'",
+    "SELECT 1 DISABLE TRIGGER ALL ON orders",
+    "SELECT 'a\\\\b'",                       # backslash inside '...'
+    "SELECT 1\\x00",
+    "SELECT \\\\1",
+    "SELECT café FROM t",                    # non-ASCII outside quotes
+    "COMMENT ON TABLE t IS 'x'",
+    "BEGIN",
+    "SELECT N'a'DELETE FROM t",             # quote glued to a keyword
+])
+def test_sql_readonly_round3_forms_are_refused(sql):
+    assert not r.sql_readonly()(sql)
+
+
+def test_sql_readonly_tcl_variables_do_not_drop_tables_in_sqlite():
+    import sqlite3
+
+    con = sqlite3.connect(":memory:")
+    con.execute("create table orders (id)")
+    sql = "SELECT @a('); DROP TABLE orders; SELECT @a(')"
+    if r.sql_readonly()(sql):
+        con.executescript(sql)
+    assert con.execute("select count(*) from sqlite_master where name='orders'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("lazy", ["future", "generator", "asyncgen"])
+def test_negated_owned_by_with_a_lazy_lookup_fails_closed(lazy):
+    import concurrent.futures
+
+    def make(_):
+        if lazy == "future":
+            f = concurrent.futures.Future()
+            f.set_result("c_42")
+            return f
+        if lazy == "generator":
+            return (x for x in ["c_42"])
+
+        async def agen():
+            yield "c_42"
+        return agen()
+
+    wall = ToolWall()
+    wall.register("approve", lambda order_id: "ok",
+                  schema=__import__("toolwall").ToolSchema(required=["order_id"]))
+    wall.rule("approve", order_id=~r.owned_by("customer_id", lookup=make))
+    with wall.context(customer_id="c_42"):
+        res = _quiet(lambda: wall.call("approve", {"order_id": "o1"}))
+    assert res.blocked and not res.executed
+
+
+def test_rule_returning_an_async_generator_raises():
+    async def agen(v):
+        yield True
+
+    with pytest.raises(TypeError):
+        r.Rule(agen, "agen")("x")
+
+
+@pytest.mark.parametrize("rule", [
+    lambda: ~r.equals_context("customer_email"),
+    lambda: ~r.owned_by("customer_id", lookup=lambda _: "c_1"),
+])
+def test_negated_context_rules_block_when_the_context_is_missing(rule):
+    wall = ToolWall()
+    wall.register("t", lambda x: "ran", schema=__import__("toolwall").ToolSchema(required=["x"]))
+    wall.rule("t", x=rule())
+    assert wall.call("t", {"x": "anything"}).blocked  # no context set at all

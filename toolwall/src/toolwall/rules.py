@@ -16,8 +16,9 @@ key isn't set: no context, no permission.
 Rules are synchronous. A rule or lookup that returns an awaitable fails closed
 (the awaitable is closed); async lookups arrive with the framework adapters.
 
-Context and `~`: a context rule fails when its key is unset, so its negation
-passes then. Write `~equals_context("k")` only when an unset key may pass.
+Context: a rule that reads the request context raises when its key is unset,
+and the policy blocks a raising rule, so `~equals_context("k")` blocks too
+when no context is set. No context, no permission, negated or not.
 
 Context follows the thread or asyncio task. Work handed to a thread pool does
 not see it unless you carry it over (`asyncio.to_thread`,
@@ -49,6 +50,20 @@ __all__ = [
 ]
 
 
+def _refuse_lazy(value: Any, what: str) -> None:
+    """Raise if value is not an answer but a promise of one.
+
+    Awaitables, generators, async generators and Futures are all truthy. Read as
+    a verdict they pass; turned into False, ~ makes them pass. Raising is the
+    only fail-closed option: the policy blocks a raising rule.
+    """
+    if inspect.isawaitable(value):
+        discard_awaitable(value)
+        raise TypeError(f"{what} returned an awaitable; it must be synchronous")
+    if inspect.isgenerator(value) or inspect.isasyncgen(value) or isinstance(value, _Future):
+        raise TypeError(f"{what} returned a lazy value (generator or Future), not an answer")
+
+
 class Rule:
     """A named predicate over one argument value. Compose with &, | and ~."""
 
@@ -58,14 +73,7 @@ class Rule:
 
     def __call__(self, value: Any) -> bool:
         verdict = self._fn(value)
-        if inspect.isawaitable(verdict):
-            # A coroutine is truthy. Inside a composed rule it would read as a pass,
-            # so raise: the policy turns a raising rule into a block (fail closed).
-            discard_awaitable(verdict)
-            raise TypeError(f"rule {self.__name__} returned an awaitable; rules must be synchronous")
-        if inspect.isgenerator(verdict) or inspect.isasyncgen(verdict) or isinstance(verdict, _Future):
-            # Also truthy, also not an answer.
-            raise TypeError(f"rule {self.__name__} returned a lazy value, not a verdict")
+        _refuse_lazy(verdict, f"rule {self.__name__}")
         return bool(verdict)
 
     def __and__(self, other: Callable[[Any], bool]) -> "Rule":
@@ -160,8 +168,8 @@ def equals_context(key: str) -> Rule:
     """The value equals the request context's `key` (e.g. the customer's own email)."""
 
     def check(value: Any) -> bool:
-        expected = _ctx.current().get(key, _UNSET)
-        return expected is not _UNSET and type(value) is type(expected) and value == expected
+        expected = _context_value(key)
+        return type(value) is type(expected) and value == expected
 
     return Rule(check, f"equals_context({key!r})")
 
@@ -176,15 +184,10 @@ def owned_by(key: str, *, lookup: Callable[[Any], Any]) -> Rule:
     """
 
     def check(value: Any) -> bool:
-        expected = _ctx.current().get(key, _UNSET)
-        if expected is _UNSET or expected is None:
-            return False
+        expected = _context_value(key)
         owner = lookup(value)
-        if inspect.isawaitable(owner):
-            # Raise rather than return False: ~owned_by(...) would turn False into
-            # a pass. The policy blocks a raising rule.
-            discard_awaitable(owner)
-            raise TypeError("owned_by lookup returned an awaitable; lookups must be synchronous")
+        # Raise rather than return False: ~owned_by(...) would turn False into a pass.
+        _refuse_lazy(owner, "owned_by lookup")
         # Type-strict like equals_context: True is not 1, and 1.0 is not 1.
         return owner is not None and type(owner) is type(expected) and owner == expected
 
@@ -192,6 +195,15 @@ def owned_by(key: str, *, lookup: Callable[[Any], Any]) -> Rule:
 
 
 _UNSET = object()
+
+
+def _context_value(key: str) -> Any:
+    """The context value, or raise: a rule that needs the context must not answer
+    without it, and an answer of False would let ~rule pass."""
+    value = _ctx.current().get(key, _UNSET)
+    if value is _UNSET or value is None:
+        raise LookupError(f"context {key!r} is not set")
+    return value
 
 
 # -- data access --------------------------------------------------------------------
@@ -205,11 +217,18 @@ _UNSET = object()
 # quoting forms every database agrees on ('...' and "..." with doubling), only
 # plain ASCII identifiers, numbers, operators and spaces are allowed.
 _SQL_QUOTED = re.compile(r"'(?:[^'\\\x00\r]|'')*'|\"(?:[^\"\\\x00\r]|\"\")*\"")
-_SQL_ALLOWED_OUTSIDE = re.compile(r"[A-Za-z0-9_ \t\n(),.*=<>!+\-/%:;|&^~?@]*")
+# No @ or : either: sqlite reads @name(...) and :name(...) as one variable token
+# that can swallow a quote, so the same text splits differently there.
+_SQL_ALLOWED_OUTSIDE = re.compile(r"[A-Za-z0-9_ \t\n(),.*=<>!+\-/%;|&^~?]*")
 _SQL_WRITE = re.compile(
     r"\b(insert|update|delete|merge|upsert|replace|drop|alter|create|truncate|rename|grant|"
     r"revoke|attach|detach|copy|call|exec|execute|do|vacuum|reindex|pragma|set|lock|into|"
-    r"load|handler|import|outfile|dumpfile)\b",
+    r"load|handler|import|outfile|dumpfile|"
+    # SQL Server ends a statement without ';', so its statement verbs can start a
+    # second statement mid-text: refuse them anywhere.
+    r"shutdown|kill|backup|restore|dbcc|deny|checkpoint|waitfor|use|begin|commit|"
+    r"rollback|disable|enable|receive|send|declare|deallocate|raiserror|throw|goto|"
+    r"print|reconfigure|bulk|openrowset|opendatasource|openquery|xp_\w+|sp_\w+)\b",
     re.I,
 )
 
@@ -236,9 +255,13 @@ def sql_readonly() -> Rule:
 
     Refused, because databases disagree about them and a disagreement is where a
     second statement hides: comments of any kind, backslashes, $ (dollar quoting
-    and $1 placeholders), #, [brackets], `backticks`, \r, NUL, and non-ASCII
-    outside quotes. Ordinary LLM-written reads fit the subset; anything else is a
-    false block, by design.
+    and $1 placeholders), #, @ and : (sqlite variables, MySQL @vars, Postgres ::
+    casts), [brackets], `backticks`, \r, NUL, and non-ASCII outside quotes. SQL
+    Server statement verbs (SHUTDOWN, KILL, BACKUP, DBCC, WAITFOR, BEGIN...) are
+    refused anywhere, because T-SQL needs no ';' between statements. Ordinary
+    LLM-written reads fit the subset; anything else is a false block, by design,
+    including columns named like a write keyword (load, lock, set, use...) and
+    replace() as a string function.
 
     It does not know which functions have side effects: pg_sleep, nextval, setval,
     set_config, lo_import, pg_read_file, dblink_exec and pg_terminate_backend all

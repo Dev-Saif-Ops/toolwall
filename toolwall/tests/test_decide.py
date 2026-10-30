@@ -245,3 +245,11 @@ def test_argument_names_are_echoed_only_up_to_the_limit():
         wall.rule("t", schema=ToolSchema(), **{name: r.one_of("ok")})
         reason = wall.decide("t", {name: "bad"}).reason
         assert (f"'{name}'" in reason) is echoed
+
+
+def test_dotted_or_dashed_argument_names_are_not_echoed():
+    for name in ("a.b", "a-b"):
+        wall = ToolWall()
+        wall.rule("t", schema=ToolSchema(), **{name: r.one_of("ok")})
+        reason = wall.decide("t", {name: "bad"}).reason
+        assert name not in reason and "an argument" in reason
