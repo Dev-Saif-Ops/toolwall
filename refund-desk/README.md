@@ -8,9 +8,13 @@ shown), not a guess.
 
 ```bash
 git clone https://github.com/Dev-Saif-Ops/toolwall && cd toolwall
-pip install -e "./toolwall[openai-agents]"      # Python 3.10 or newer
+pip install "toolwall[openai-agents]>=0.7"      # Python 3.10 or newer
 python refund-desk/run.py
 ```
+
+The demo's code lives in the clone; ToolWall itself comes from PyPI. To run it
+against the code in the clone instead (say, while changing ToolWall), use
+`pip install -e "./toolwall[openai-agents]"`.
 
 No API key needed. Offline, a scripted model plays a model that has already
 been talked into each attack: it makes exactly the tool calls the attack is

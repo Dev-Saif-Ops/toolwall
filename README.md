@@ -365,7 +365,7 @@ replayed approval) with and without ToolWall, and checks that honest requests
 still work:
 
 ```bash
-pip install -e "./toolwall[openai-agents]"
+pip install "toolwall[openai-agents]>=0.7"
 python refund-desk/run.py          # no API key: a scripted model plays a fooled model
 ```
 
