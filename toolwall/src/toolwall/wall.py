@@ -25,7 +25,7 @@ from typing import Any
 from toolwall.gate import ApprovalHandler, DefaultMode, Gate, GateResult
 from toolwall.meter import Meter
 from toolwall.policy import Policy
-from toolwall.schema import ToolSchema, fully_annotated
+from toolwall.schema import ToolSchema, infer_schema_if_annotated
 from toolwall.shield import Shield
 
 ToolFn = Callable[..., Any]
@@ -35,7 +35,8 @@ class ToolWall:
     """Fail-closed security gateway for AI agent tool calls.
 
     Args:
-        default: "deny" (registered tools still need a schema) or "allow".
+        default: "deny" (a registered tool needs a schema, given or inferred from a
+            fully annotated signature) or "allow".
         detect_secrets: attach a Shield. True blocks secrets in tool args;
             pass redact=True to replace them with placeholders instead.
         redact: if detecting secrets, redact instead of block.
@@ -71,13 +72,17 @@ class ToolWall:
         """Register a tool. Registration is the allowlist.
 
         With no schema, a function whose every parameter and return value are
-        annotated gets its schema from its signature (required args, types, no
-        unknown args). Anything less (a lambda, a partly annotated function) still
-        needs a schema: under default deny it is blocked until it has one.
-        infer_schema=False opts out.
+        annotated gets its schema from its signature: required args, types, no
+        unknown args. Supported annotations are classes, X | None, Optional and
+        Union of classes, generic containers (list[str] checks for a list), Any and
+        Annotated[...]; float also accepts int. Anything less (a lambda, a partly
+        annotated function, Literal) still needs a schema: under default deny it is
+        blocked until it has one. infer_schema=False opts out.
         """
         if infer_schema is None:
-            infer_schema = schema is None and fully_annotated(fn)
+            infer_schema = False
+            if schema is None:
+                schema = infer_schema_if_annotated(fn)  # None unless fully annotated
         self.gate.register(
             name, fn, schema, policy=policy, infer_schema=infer_schema, replace=replace
         )

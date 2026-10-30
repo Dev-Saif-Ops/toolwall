@@ -12,6 +12,10 @@ async agent framework. Every fix has a test that fails on 0.4.2.
   saw the result. The sync path now refuses an async tool before spending budget,
   and withholds any awaitable a sync callable returns. Awaitables nested in an
   output are withheld as unscannable.
+- **Streaming tools skipped the output scan on every path,** 0.4.2's sync path
+  included. An async generator is not an iterator, not awaitable and not
+  `iter()`-able, so the shield read its `str()` and passed it through. Async
+  generators and anything with `__aiter__`/`__anext__` are now withheld.
 - **An async approval handler approved everything on the sync path,** because its
   coroutine is truthy. It is now refused there, closed, and awaited on the async
   path.
@@ -25,19 +29,32 @@ async agent framework. Every fix has a test that fails on 0.4.2.
 - `python -m toolwall demo`: a support agent's seven tool calls gated, with no model
   or API key.
 - `ToolWall.register()` infers the schema when every parameter and the return value
-  are annotated (no `**kwargs`). A lambda or a partly annotated function is still
-  denied by default until it has a schema; `infer_schema=False` opts out. `Gate` is
-  unchanged. String annotations (`from __future__ import annotations`) are now
-  resolved, so their types are enforced.
+  are annotated (no `**kwargs`). Supported: classes, `X | None`, `Optional`, `Union`,
+  generic containers (the container is checked, not its items), `Any` and
+  `Annotated[...]`; `float` also accepts an integer, since JSON has one number type.
+  `Literal`, a lambda or a partly annotated function still needs a schema and is
+  denied by default until it has one; `infer_schema=False` opts out. `Gate` is
+  unchanged. String annotations (`from __future__ import annotations`) are resolved
+  once, at registration, so their types are enforced; an annotation that can't be
+  resolved means no inference, never an error from `register()`.
+- A tool cancelled after it started (`CancelledError`, `KeyboardInterrupt`) is
+  recorded in the audit with its spent budget slot, then the cancellation is
+  re-raised.
 - CI on GitHub Actions for Python 3.10 to 3.13: tests with `RuntimeWarning` as an
   error, coverage, the attack suite, the demo, and a clean-install package check.
 - `py.typed`.
+
+### Upgrade note
+- **A fully annotated tool registered on `ToolWall` without a schema now runs.** In
+  0.4.2 it was blocked with "no schema registered". Registration is still the
+  allowlist, and argument names, types and policies are enforced. To keep the old
+  behaviour, pass `infer_schema=False`, or use `Gate`, which does not infer.
 
 ### Changed
 - PyPI metadata: Python version classifiers, project URLs (site, source, changelog,
   issues, security policy), and the keywords `agent-sandbox` and `mcp-proxy`
   removed, since toolwall is neither.
-- 245 to 276 tests.
+- 245 to 292 tests.
 
 ## [0.4.2] - 2026-10-05
 

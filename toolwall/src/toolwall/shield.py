@@ -384,7 +384,16 @@ def _walk_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
             continue
         seen.add(id(item))
         keep.append(item)
-        if isinstance(item, Iterator) or inspect.isawaitable(item):
+        # Lazy values: iterating, awaiting or async-iterating them is the only way to
+        # see what they hold, and that would consume them. An async generator is none
+        # of Iterator, awaitable or iter()-able, so it needs its own test.
+        if (
+            isinstance(item, Iterator)
+            or inspect.isawaitable(item)
+            or inspect.isasyncgen(item)
+            or hasattr(item, "__aiter__")
+            or hasattr(item, "__anext__")
+        ):
             raise _unscannable(item)
         if isinstance(item, array.array):
             # Element-wise each entry is one char or one int; scan the text it holds.

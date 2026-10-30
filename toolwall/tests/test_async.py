@@ -312,3 +312,110 @@ def test_mcp_guard_ahandle_awaits_an_async_approval_handler():
     assert run(guard.ahandle("wipe", {"id": 1})).forwarded
     assert not run(guard.ahandle("wipe", {"id": 2})).forwarded
     assert forwarded == [1]
+
+
+# --- round 2 (critic, 0.4.3) ---------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["block", "redact"])
+def test_async_generator_output_is_withheld_on_both_paths(mode):
+    async def stream():
+        yield {"billing_api_key": "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc"}
+
+    gate = Gate(default="allow", shield=Shield(mode=mode))
+    gate.register("s", stream)
+    for result in (gate.run({"name": "s", "args": {}}), run(gate.arun({"name": "s", "args": {}}))):
+        assert result.return_value is None, mode
+        assert "withheld" in result.error
+
+
+def test_async_generator_nested_in_output_is_withheld():
+    async def stream():
+        yield AWS_KEY
+
+    gate = Gate(default="allow", shield=Shield(mode="block"))
+    gate.register("t", lambda: {"rows": stream()})
+    result = gate.run({"name": "t", "args": {}})
+    assert result.return_value is None
+
+
+def test_cancelled_async_tool_is_recorded_and_spends_its_slot():
+    started = []
+
+    async def slow():
+        started.append(1)
+        await asyncio.sleep(10)
+
+    wall = ToolWall()
+    wall.register("slow", slow, schema=ToolSchema())
+    wall.budget(max_calls=1)
+
+    async def main():
+        task = asyncio.ensure_future(wall.acall("slow"))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return await wall.acall("slow")
+
+    retry = run(main())
+    assert started == [1]
+    assert retry.verdict is Verdict.BLOCK  # the slot was spent: no silent second run
+    events = [e for e in wall.meter.report.events if e.kind == "tool"]
+    assert events and not events[0].ok and "cancelled" in (events[0].error or "")
+
+
+def test_aguard_awaits_an_async_approval_handler():
+    ran = []
+
+    async def approve(result):
+        return result.call.args["id"] == 1
+
+    wall = ToolWall(approval=approve)
+    wall.register("wipe", lambda id: ran.append(id), schema=ToolSchema(required=["id"]),
+                  policy=Policy(require_approval=True))
+    payload = {"choices": [{"message": {"tool_calls": [
+        {"id": "a", "function": {"name": "wipe", "arguments": '{"id": 1}'}},
+        {"id": "b", "function": {"name": "wipe", "arguments": '{"id": 2}'}},
+    ]}}]}
+    results = run(wall.aguard(payload))
+    assert [r.verdict for r in results] == [Verdict.ALLOW, Verdict.BLOCK]
+    assert ran == [1]
+
+
+def test_async_handler_returning_a_coroutine_fails_closed():
+    async def inner():
+        return True
+
+    async def handler(result):
+        return inner()  # an awaitable, not a yes
+
+    ran = []
+    wall = ToolWall(approval=handler)
+    wall.register("wipe", lambda id: ran.append(id), schema=ToolSchema(required=["id"]),
+                  policy=Policy(require_approval=True))
+    result = no_unawaited_coroutines(lambda: run(wall.acall("wipe", {"id": 1})))
+    assert ran == [] and result.verdict is Verdict.BLOCK
+
+
+def test_async_dunder_call_is_refused_before_budget_is_spent():
+    class Tool:
+        async def __call__(self):
+            return "x"
+
+    gate = Gate(default="deny")
+    gate.register("t", Tool(), schema=ToolSchema())
+    gate.budget(max_calls=1)
+    refused = no_unawaited_coroutines(lambda: gate.run({"name": "t", "args": {}}))
+    assert refused.verdict is Verdict.BLOCK
+    assert run(gate.arun({"name": "t", "args": {}})).return_value == "x"  # budget still there
+
+
+def test_mcp_sync_handle_with_async_forward_is_not_forwarded():
+    async def forward(name, args):
+        return "ok"
+
+    gate = Gate(default="deny")
+    gate.register("t", lambda: None, schema=ToolSchema())
+    out = no_unawaited_coroutines(lambda: MCPGuard(gate, forward).handle("t", {}))
+    assert out.forwarded is False

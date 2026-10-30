@@ -11,7 +11,7 @@
 >
 > Your LLM can generate a **valid** tool call. That doesn't mean it's **safe** to execute.
 
-**Status: v0.4.3 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 276 tests in CI on Python 3.10–3.13 · published attack suite.**
+**Status: v0.4.3 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 292 tests in CI on Python 3.10–3.13 · published attack suite.**
 
 ```bash
 pip install toolwall
@@ -40,13 +40,25 @@ python -m toolwall demo
 ```
 
 ```text
+toolwall demo: a support agent serving customer c_42
+Every verdict below comes from the real gate. No model or API key.
+
   ALLOW  issue_refund(order_id='o_9', amount=40.0)
-  BLOCK  issue_refund(order_id='o_9', amount=5000.0)       over the 500 cap
-  BLOCK  issue_refund(order_id='o_77', amount=40.0)        order belongs to another customer
-  BLOCK  send_email(to='x@evil.com,ops@ourco.com', ...)    not an allowed recipient
-  ALLOW  lookup_customer(customer_id='c_42')               output withheld: it held an API key
-  HELD   close_account(customer_id='c_42')                 waiting for a human
-  BLOCK  drop_all_tables()                                 a tool nobody registered
+         an honest refund: ran: refunded 40.00 on o_9
+  BLOCK  issue_refund(order_id='o_9', amount=5000.0)
+         a refund over the cap: policy violation: arg 'amount' rejected by in_range(0.01, 500)
+  BLOCK  issue_refund(order_id='o_77', amount=40.0)
+         someone else's order: order does not belong to the signed-in customer
+  BLOCK  send_email(to='x@evil.com,ops@ourco.com', body='export')
+         a smuggled recipient: policy violation: arg 'to' rejected by customer_or_ourco
+  ALLOW  lookup_customer(customer_id='c_42')
+         a lookup whose record holds a key: ran, but tool output withheld: secret detected (stripe-key) in 'return.billing_api_key'
+  HELD   close_account(customer_id='c_42')
+         a destructive action: waiting for a human to approve
+  BLOCK  drop_all_tables()
+         a tool nobody registered: unknown tool: 'drop_all_tables'
+
+1 ran · 5 stopped · 1 waiting for a human. Every decision is in the audit log (wall.export).
 ```
 
 ---
@@ -205,8 +217,14 @@ results = await wall.aguard(openai_response)
 ```
 
 The sync `call` refuses an async tool instead of reporting a coroutine as a run.
+A tool that streams (an async generator) has its output withheld on both paths:
+return a materialised list instead.
+
 A function whose parameters and return value are all annotated gets its schema
-from its signature; anything less still needs `schema=`.
+from its signature: classes, `X | None`, `Optional`, `Union`, generic containers
+(`list[str]` checks for a list), `Any` and `Annotated[...]`; `float` also accepts an
+integer. Anything else (`Literal`, a lambda, a partly annotated function) still
+needs `schema=`.
 
 
 Two policy details worth knowing: `matches()` is a full match (anchor nothing, the
@@ -285,7 +303,7 @@ Run the tests and the published attack suite yourself:
 
 ```bash
 cd toolwall && pip install -e ".[dev]"
-pytest                                    # 276 tests
+pytest                                    # 292 tests
 python ../gate-suite/run_suite.py         # 35/35 attacks blocked, prints the G1 report
 ```
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import types
+import typing
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,34 +43,98 @@ class ToolSchema:
 
 def _signature(fn: Any) -> inspect.Signature:
     # eval_str resolves string annotations (modules using `from __future__ import
-    # annotations`), so types are enforced there too. Fall back if one can't resolve.
+    # annotations`), so types are enforced there too. If any annotation can't be
+    # resolved, fall back to the raw signature: those annotations stay strings and
+    # are treated as unsupported, which means no inference rather than an error.
     try:
         return inspect.signature(fn, eval_str=True)
-    except (NameError, TypeError, SyntaxError):
+    except Exception:
         return inspect.signature(fn)
 
 
-def fully_annotated(fn: Any) -> bool:
-    """True when every named parameter and the return value carry a resolvable
-    annotation and the callable takes no **kwargs: the author declared the whole
-    signature, so it can stand in for a schema. A bare `lambda` never qualifies."""
-    try:
-        sig = _signature(fn)
-    except (TypeError, ValueError):
-        return False
-    named = [
+_ANY = object()  # an annotation that constrains nothing (typing.Any)
+
+
+def _resolve_annotation(ann: Any) -> "tuple[type, ...] | object | None":
+    """Map an annotation to the classes isinstance() should accept.
+
+    Returns a tuple of classes, _ANY for typing.Any, or None when the annotation
+    can't be checked with isinstance (Literal, TypedDict, a string, a TypeVar...).
+    Generic containers check the container only: list[str] accepts any list.
+    float also accepts int, because JSON has one number type.
+    """
+    if ann is typing.Any:
+        return _ANY
+    origin = typing.get_origin(ann)
+    if origin is typing.Annotated:
+        return _resolve_annotation(typing.get_args(ann)[0])
+    if origin is typing.Union or origin is types.UnionType:
+        accepted: list[type] = []
+        for member in typing.get_args(ann):
+            resolved = _resolve_annotation(member)
+            if resolved is None:
+                return None
+            if resolved is _ANY:
+                return _ANY
+            accepted.extend(resolved)  # type: ignore[arg-type]
+        return tuple(dict.fromkeys(accepted))
+    if origin is not None:
+        # list[str] -> list, typing.List[str] -> list; Literal's origin is not a class.
+        return (origin,) if isinstance(origin, type) else None
+    if ann is None or ann is type(None):
+        return (type(None),)
+    # On 3.10, isinstance(list[str], type) is True; GenericAlias is handled above.
+    if isinstance(ann, type) and not isinstance(ann, types.GenericAlias):
+        return (int, float) if ann is float else (ann,)
+    return None
+
+
+def _named_params(sig: inspect.Signature) -> list[inspect.Parameter]:
+    return [
         p for name, p in sig.parameters.items()
         if name not in ("self", "cls") and p.kind is not p.VAR_POSITIONAL
     ]
+
+
+def _fully_annotated(sig: inspect.Signature) -> bool:
+    named = _named_params(sig)
     if any(p.kind is p.VAR_KEYWORD for p in named):
         return False
     if sig.return_annotation is inspect.Signature.empty:
         return False
-    # Parameter.empty is itself a class, so test for it before isinstance(type).
-    return all(p.annotation is not p.empty and isinstance(p.annotation, type) for p in named)
+    # Parameter.empty is itself a class, so it must be excluded explicitly.
+    return all(
+        p.annotation is not p.empty and _resolve_annotation(p.annotation) is not None
+        for p in named
+    )
 
 
-def schema_from_signature(fn: Any, *, required: list[str] | None = None) -> ToolSchema:
+def fully_annotated(fn: Any) -> bool:
+    """True when every named parameter has an annotation toolwall can check (a
+    class, X | None, Union, Optional, a generic container, Any, Annotated[...]),
+    the return value is annotated, and there is no **kwargs: the author declared
+    the whole signature, so it can stand in for a schema. A lambda never does."""
+    try:
+        return _fully_annotated(_signature(fn))
+    except (TypeError, ValueError):
+        return False
+
+
+def infer_schema_if_annotated(fn: Any) -> "ToolSchema | None":
+    """One signature read: the inferred schema, or None when fn isn't fully
+    annotated. Annotation expressions are evaluated once."""
+    try:
+        sig = _signature(fn)
+    except (TypeError, ValueError):
+        return None
+    if not _fully_annotated(sig):
+        return None
+    return schema_from_signature(fn, _sig=sig)
+
+
+def schema_from_signature(
+    fn: Any, *, required: list[str] | None = None, _sig: inspect.Signature | None = None
+) -> ToolSchema:
     """Best-effort schema from a callable signature (stdlib inspect).
 
     Extra arguments are rejected, because the signature already tells us exactly
@@ -79,7 +145,7 @@ def schema_from_signature(fn: Any, *, required: list[str] | None = None) -> Tool
     The exception is a callable that declares **kwargs: it genuinely accepts
     arguments we cannot enumerate, so extras stay allowed there.
     """
-    sig = _signature(fn)
+    sig = _sig if _sig is not None else _signature(fn)
     req: list[str] = []
     opt: list[str] = []
     types: dict[str, type | tuple[type, ...]] = {}
@@ -97,8 +163,10 @@ def schema_from_signature(fn: Any, *, required: list[str] | None = None) -> Tool
         else:
             opt.append(name)
         ann = param.annotation
-        if ann is not inspect.Parameter.empty and isinstance(ann, type):
-            types[name] = ann
+        if ann is not inspect.Parameter.empty:
+            resolved = _resolve_annotation(ann)
+            if isinstance(resolved, tuple):
+                types[name] = resolved[0] if len(resolved) == 1 else resolved
     if required is not None:
         # A caller-supplied required list overrides which args are mandatory, but
         # every name from the signature is still a known argument.

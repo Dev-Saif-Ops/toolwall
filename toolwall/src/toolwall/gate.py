@@ -394,6 +394,10 @@ class Gate:
             value = target(args)
         except Exception as exc:
             result.error = self._scan_error_text(f"{type(exc).__name__}: {exc}", type(exc).__name__)
+        except BaseException as exc:  # KeyboardInterrupt and friends: audit, then re-raise
+            result.error = f"cancelled ({type(exc).__name__}) after the tool started"
+            self._record_tool(result, invoke)
+            raise
         else:
             if inspect.isawaitable(value):
                 discard_awaitable(value)
@@ -423,6 +427,12 @@ class Gate:
                 value = await value
         except Exception as exc:
             result.error = self._scan_error_text(f"{type(exc).__name__}: {exc}", type(exc).__name__)
+        except BaseException as exc:
+            # Cancelled (or interrupted) after the tool started: its side effects may
+            # have happened. Record that in the audit, keep the spent budget, re-raise.
+            result.error = f"cancelled ({type(exc).__name__}) after the tool started"
+            self._record_tool(result, invoke)
+            raise
         else:
             if inspect.isawaitable(value):  # an awaitable that resolved to another one
                 discard_awaitable(value)

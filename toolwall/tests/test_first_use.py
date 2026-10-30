@@ -101,3 +101,88 @@ def test_zero_arg_typed_function_is_inferred_and_rejects_args():
     wall.register("ping", ping)
     assert wall.call("ping").return_value == "pong"
     assert wall.call("ping", {"x": 1}).verdict is Verdict.BLOCK
+
+
+# --- round 2 (critic, 0.4.3): annotations people actually write -----------------
+
+from typing import Annotated, Any, List, Optional, Union
+
+
+def test_optional_and_union_annotations_are_inferred_and_enforced():
+    def f(city: str | None, unit: Optional[str] = None, n: Union[int, str] = 1) -> str:
+        return f"{city}{unit}{n}"
+
+    wall = ToolWall()
+    wall.register("f", f)
+    assert wall.call("f", {"city": None}).executed
+    assert wall.call("f", {"city": "a", "unit": "c", "n": "x"}).executed
+    assert wall.call("f", {"city": 5}).verdict is Verdict.BLOCK
+    assert wall.call("f", {"city": "a", "n": 2.5}).verdict is Verdict.BLOCK
+
+
+def test_generic_containers_check_the_container():
+    def f(tags: list[str], meta: dict[str, int], old: List[str]) -> int:
+        return len(tags)
+
+    wall = ToolWall()
+    wall.register("f", f)
+    assert wall.call("f", {"tags": ["a"], "meta": {}, "old": []}).executed
+    assert wall.call("f", {"tags": "a", "meta": {}, "old": []}).verdict is Verdict.BLOCK
+
+
+def test_any_and_annotated_are_callable():
+    def f(payload: Any, note: Annotated[str, "free text"]) -> str:
+        return note
+
+    wall = ToolWall()
+    wall.register("f", f)
+    assert wall.call("f", {"payload": {"x": 1}, "note": "hi"}).return_value == "hi"
+    assert wall.call("f", {"payload": 1, "note": 2}).verdict is Verdict.BLOCK
+
+
+def test_float_parameter_accepts_a_json_integer():
+    def refund(amount: float) -> str:
+        return str(amount)
+
+    wall = ToolWall()
+    wall.register("refund", refund)
+    assert wall.call("refund", {"amount": 40}).executed
+    assert wall.call("refund", {"amount": "40"}).verdict is Verdict.BLOCK
+
+
+def test_unsupported_annotation_is_not_inferred():
+    from typing import Literal
+
+    def f(mode: Literal["a", "b"]) -> str:
+        return mode
+
+    wall = ToolWall()
+    wall.register("f", f)
+    r = wall.call("f", {"mode": "a"})
+    assert r.verdict is Verdict.BLOCK and "no schema" in r.reason
+
+
+def test_kwargs_stops_inference():
+    def f(a: str, **extra: str) -> str:
+        return a
+
+    wall = ToolWall()
+    wall.register("f", f)
+    assert wall.call("f", {"a": "x", "b": "y"}).verdict is Verdict.BLOCK
+
+
+def test_broken_annotation_does_not_break_register():
+    ns: dict = {}
+    exec("from __future__ import annotations\nimport typing\n"
+         "def f(n: typing.DoesNotExist) -> int:\n    return 1\n", ns)
+    wall = ToolWall()
+    wall.register("f", ns["f"])            # must not raise
+    assert wall.call("f", {"n": 1}).verdict is Verdict.BLOCK
+
+
+def test_annotations_are_evaluated_once_at_registration():
+    seen = []
+    ns = {"mark": lambda: (seen.append(1), int)[1]}
+    exec("from __future__ import annotations\ndef f(n: mark()) -> int:\n    return n\n", ns)
+    ToolWall().register("f", ns["f"])
+    assert len(seen) == 1
