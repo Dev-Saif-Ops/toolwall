@@ -358,14 +358,15 @@ Full guide: [docs/approvals.md](docs/approvals.md).
 ## Refund Desk: six attacks on a support agent
 
 [refund-desk/](refund-desk/) is a small support agent on the OpenAI Agents SDK
-with a SQLite shop behind it. One command runs six attacks (a prompt-injected
-ticket, another customer's order, a refund bigger than the order, recipient
-smuggling, a key in a lookup result, a replayed approval) with and without
-ToolWall, and checks that honest requests still work:
+with a SQLite shop behind it. One command runs eight attacks (a prompt-injected
+ticket, another customer's order or data, a refund bigger than the order or
+split into small ones, recipient smuggling, a key in a lookup result, a
+replayed approval) with and without ToolWall, and checks that honest requests
+still work:
 
 ```bash
-pip install -r refund-desk/requirements.txt
-python refund-desk/run.py          # no API key: a scripted model
+pip install -e "./toolwall[openai-agents]"
+python refund-desk/run.py          # no API key: a scripted model plays a fooled model
 ```
 
 ## Examples

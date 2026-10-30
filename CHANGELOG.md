@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- `refund-desk/`: a reference support agent (OpenAI Agents SDK, SQLite) and six
+- `refund-desk/`: a reference support agent (OpenAI Agents SDK, SQLite) and eight
   attacks run with and without ToolWall, plus honest requests that must keep
   working. `python refund-desk/run.py --check` runs in CI.
 
