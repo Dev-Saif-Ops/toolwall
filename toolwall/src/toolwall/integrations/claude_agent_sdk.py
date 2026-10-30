@@ -20,6 +20,16 @@ PostToolUse scans what the tool returned. The SDK keeps the original output
 when a replacement doesn't match a built-in tool's output shape, so secrets are
 replaced in place with placeholders (the shape is kept) rather than withheld.
 
+Limit: when a tool fails (an MCP tool error or exception, Bash exiting
+non-zero) the SDK fires PostToolUseFailure, which can't replace what the model
+sees, so a failing tool's error text reaches the model unscanned. For your own
+SDK MCP tools, wrap them with wall.protect (or toolwall.integrations.mcp.guard),
+which scrubs exception text before the SDK sees it.
+
+The hooks read wall.context when the client connects, not per query: open one
+client per customer inside `with wall.context(...)`. An "ask" needs a
+can_use_tool callback; without one the CLI refuses the call.
+
 Registration is the allowlist: every tool the hook sees must be known to the
 wall (wall.rule(name, schema=...) for tools the SDK runs). Use `matcher` to
 scope the hooks to the tools you want gated; built-in tools are named Bash,
@@ -47,7 +57,11 @@ def pre_tool_use(wall: "ToolWall"):
             decision_slot = wall.take_slot(decision)
             if decision_slot.denied:
                 return _decision(input_data, "deny", decision_slot.reason)
-            return _decision(input_data, "ask", decision.reason)
+            out = _decision(input_data, "ask", decision.reason)
+            if decision.args != args:
+                # Redacted: the person sees, and the tool gets, the clean arguments.
+                out["hookSpecificOutput"]["updatedInput"] = dict(decision.args)
+            return out
         if decision.denied:
             return _decision(input_data, "deny", decision.reason)
         if decision.args != args:

@@ -299,9 +299,9 @@ guard = MCPGuard(wall.gate, forward=call_downstream_mcp_server)
 decision = guard.handle(tool_name, args)   # only ALLOW is forwarded; blocks return an MCP error
 ```
 
-`forward` is your own function that calls the downstream server. toolwall does not
-ship an MCP transport yet: `pip install 'toolwall[mcp]'` only installs the `mcp`
-package for that function to use.
+`forward` is your own function that calls the downstream server; toolwall ships no
+MCP transport. To guard tools on your own MCP server, use `@guard(wall)` from
+`toolwall.integrations.mcp` (section 5).
 
 ### 5. Plug into your agent framework
 

@@ -96,3 +96,25 @@ def test_take_slot_only_turns_ask_into_allow():
         assert held.verdict == "ask"
         assert wall.take_slot(held).verdict == "allow"
         assert wall.take_slot(held).verdict == "deny"  # budget spent
+
+
+def test_protect_refuses_a_name_registered_to_another_function():
+    wall = ToolWall()
+    wall.register("lookup", lambda q: q, schema=ToolSchema(required=["q"]))
+    with pytest.raises(ValueError):
+        @wall.protect(name="lookup")
+        def lookup(q: str) -> str:
+            return q
+
+
+def test_protect_withholds_output_carrying_a_secret():
+    wall = ToolWall()
+    key = "AKIA" + "IOSFODNN7EXAMPLE"
+
+    @wall.protect
+    def leak(x: str) -> str:
+        return f"key {key}"
+
+    with pytest.raises(ToolBlocked) as e:
+        leak("a")
+    assert key not in str(e.value)

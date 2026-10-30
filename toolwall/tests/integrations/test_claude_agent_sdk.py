@@ -112,3 +112,14 @@ def test_hooks_builds_matchers_for_both_events():
     assert set(built) == {"PreToolUse", "PostToolUse"}
     for matchers in built.values():
         assert isinstance(matchers[0], HookMatcher) and matchers[0].matcher == "^mcp__shop__"
+
+
+def test_held_call_in_redact_mode_hands_on_the_redacted_arguments():
+    # The person approving, and the tool once approved, must not see the secret.
+    wall = ToolWall(redact=True)
+    wall.rule("mcp__shop__pay", schema=ToolSchema(required=["text"], types={"text": str}),
+              require_approval=True)
+    out = pre(wall, {"text": f"pay to {AWS_KEY}"}, name="mcp__shop__pay")
+    spec = out["hookSpecificOutput"]
+    assert spec["permissionDecision"] == "ask"
+    assert AWS_KEY not in spec["updatedInput"]["text"]

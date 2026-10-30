@@ -16,13 +16,15 @@ Around every tool call:
   Command(resume=True) to approve or Command(resume=False) to decline. Approving
   takes the budget slot. Interrupts need a checkpointer.
 - "allow": the tool runs (with the wall's redacted arguments, if it redacted a
-  secret), and its output is scanned before the model sees it.
+  secret), and its output is scanned before the model sees it, including the
+  messages in a Command a tool returns.
 
 The tool's name in LangChain is the name the wall's rules use.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING, Any
 
 from langchain.agents.middleware import AgentMiddleware
@@ -73,9 +75,55 @@ class ToolWallMiddleware(AgentMiddleware):
 
     def _after(self, request: Any, result: Any) -> Any:
         from langchain.messages import ToolMessage
+        from langgraph.types import Command
 
+        if isinstance(result, Command):
+            return self._after_command(request, result)
         if not isinstance(result, ToolMessage):
-            return result  # a Command or other control value: not tool output
+            return result
+        return self._scan_message(request, result)
+
+    def _after_command(self, request: Any, command: Any) -> Any:
+        """A tool that returns a Command carries its messages in update: scan
+        those. Any other update shape is withheld rather than passed unscanned."""
+        from langchain.messages import ToolMessage
+
+        update = command.update
+        if update is None:
+            return command
+        if not isinstance(update, dict):
+            return self._withheld_command(request, command)
+        messages = update.get("messages")
+        others = {k: v for k, v in update.items() if k != "messages"}
+        if others:
+            checked = self.wall.check_output(request.tool_call.get("name"), others)
+            if checked.withheld:
+                return self._withheld_command(request, command)
+            if checked.value is not others:
+                others = checked.value
+        if messages is None:
+            return dataclasses.replace(command, update=others)
+        if not isinstance(messages, list):
+            messages = [messages]
+        cleaned = []
+        for m in messages:
+            if isinstance(m, ToolMessage):
+                cleaned.append(self._scan_message(request, m))
+                continue
+            checked = self.wall.check_output(request.tool_call.get("name"), getattr(m, "content", m))
+            if checked.withheld or checked.value is not getattr(m, "content", m):
+                return self._withheld_command(request, command)
+            cleaned.append(m)
+        return dataclasses.replace(command, update={**others, "messages": cleaned})
+
+    def _withheld_command(self, request: Any, command: Any) -> Any:
+        from langchain.messages import ToolMessage
+
+        return ToolMessage(content="The tool's output was withheld because it contained what "
+                                   "looks like a secret or couldn't be checked.",
+                           tool_call_id=request.tool_call.get("id"), status="error")
+
+    def _scan_message(self, request: Any, result: Any) -> Any:
         checked = self.wall.check_output(request.tool_call.get("name"), result.content)
         if checked.withheld:
             return result.model_copy(update={"content": checked.reason, "status": "error",

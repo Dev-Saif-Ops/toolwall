@@ -26,8 +26,10 @@ same rules; the framework keeps running the tool.
   person approves it. Any decision other than "ask" comes back unchanged.
 - Install extras: `openai-agents`, `claude-agent-sdk`, `langchain`,
   `integrations`. The core stays dependency-free.
-- `docs/frameworks.md`, and a CI job that runs every adapter against the real
-  framework (and the MCP adapter on mcp 1.x) and fails if any test is skipped.
+- `docs/frameworks.md`, and a CI job that runs the adapter tests with every
+  framework installed (and the MCP adapter on mcp 1.x) and fails if any test is
+  skipped. The OpenAI, LangChain and MCP tests run the framework's real agent
+  loop or server; the Claude tests call the hooks with the input the SDK sends.
 
 ### Known limits
 - OpenAI Agents SDK: annotate numbers `int | float`, not `float`. When the SDK's
@@ -36,6 +38,10 @@ same rules; the framework keeps running the tool.
   since the SDK can't swap them.
 - MCP has no standard approval flow, so a held call is refused with a reason
   saying it needs approval.
+- Claude Agent SDK: a failing tool's error text (an MCP tool error, Bash exiting
+  non-zero) reaches the model unscanned, because the SDK's failure hook can't
+  replace it. Wrap your own SDK MCP tools with `wall.protect`, which scrubs
+  exception text. The hooks read the context when the client connects.
 - Approvals live in memory for one run. Tickets that survive a restart are 0.7.
 
 ## [0.5.0] - unreleased

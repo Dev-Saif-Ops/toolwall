@@ -320,6 +320,11 @@ class ToolWall:
             existing = registry.get(tool)
             if existing is None:
                 self.register(tool, f)
+            elif existing is not f and not getattr(existing, "__toolwall_decide_only__", False):
+                raise ValueError(
+                    f"{tool!r} is already registered with another function; "
+                    "protect would run that one, not this"
+                )
             elif getattr(existing, "__toolwall_decide_only__", False):
                 # Declared with wall.rule(schema=...): attach the function, keep
                 # the declared schema and rules.

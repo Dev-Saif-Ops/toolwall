@@ -5,6 +5,7 @@ Skipped unless langchain (>= 1.0) and langgraph are installed.
 
 import asyncio
 import itertools
+from typing import Annotated
 
 import pytest
 
@@ -13,6 +14,7 @@ pytest.importorskip("langchain.agents.middleware")
 from langchain.agents import create_agent  # noqa: E402
 from langchain.messages import AIMessage, ToolMessage  # noqa: E402
 from langchain.tools import tool  # noqa: E402
+from langchain_core.tools import InjectedToolCallId  # noqa: E402
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel  # noqa: E402
 from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
 from langgraph.types import Command  # noqa: E402
@@ -158,3 +160,73 @@ def test_no_context_means_no_refund():
     agent = agent_for(scripted("issue_refund", {"order_id": "o_9", "amount": 40}), [issue_refund], mw)
     agent.invoke({"messages": [("user", "refund")]}, config())
     assert ran == []
+
+
+def test_a_tool_returning_a_command_has_its_messages_scanned():
+    wall = ToolWall()
+
+    @tool
+    def lookup_customer(customer_id: str, tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
+        """Look up a customer."""
+        return Command(update={"messages": [
+            ToolMessage(content=f"plan pro, key {AWS_KEY}", tool_call_id=tool_call_id)]})
+
+    wall.rule("lookup_customer", schema=ToolSchema(required=["customer_id"]))
+    agent = agent_for(scripted("lookup_customer", {"customer_id": "c_42"}), [lookup_customer],
+                      ToolWallMiddleware(wall))
+    state = agent.invoke({"messages": [("user", "who")]}, config())
+    assert all(AWS_KEY not in str(m.content) for m in state["messages"])
+
+
+def test_redacted_arguments_reach_the_tool():
+    seen = []
+    wall = ToolWall(redact=True)
+
+    @tool
+    def note(text: str) -> str:
+        """Save a note."""
+        seen.append(text)
+        return "ok"
+
+    wall.rule("note", schema=ToolSchema(required=["text"], types={"text": str}))
+    agent = agent_for(scripted("note", {"text": f"key {AWS_KEY}"}), [note], ToolWallMiddleware(wall))
+    agent.invoke({"messages": [("user", "note")]}, config())
+    assert len(seen) == 1 and AWS_KEY not in seen[0]
+
+
+def test_only_true_approves_a_held_call():
+    ran = []
+    wall, issue_refund, mw = make(ran)
+    agent = agent_for(scripted("issue_refund", {"order_id": "o_9", "amount": 300}), [issue_refund], mw)
+    cfg = config()
+    with wall.context(customer_id="c_42"):
+        agent.invoke({"messages": [("user", "refund")]}, cfg)
+        agent.invoke(Command(resume="yes"), cfg)
+    assert ran == []
+
+
+def test_an_approved_call_takes_a_budget_slot():
+    ran = []
+    wall, issue_refund, mw = make(ran)
+    wall.budget(max_calls=0)
+    agent = agent_for(scripted("issue_refund", {"order_id": "o_9", "amount": 300}), [issue_refund], mw)
+    cfg = config()
+    with wall.context(customer_id="c_42"):
+        agent.invoke({"messages": [("user", "refund")]}, cfg)
+        agent.invoke(Command(resume=True), cfg)
+    assert ran == []
+
+
+def test_artifact_carrying_a_secret_is_dropped():
+    wall = ToolWall()
+
+    @tool(response_format="content_and_artifact")
+    def lookup_customer(customer_id: str):
+        """Look up a customer."""
+        return "plan pro", {"key": AWS_KEY}
+
+    wall.rule("lookup_customer", schema=ToolSchema(required=["customer_id"]))
+    agent = agent_for(scripted("lookup_customer", {"customer_id": "c_42"}), [lookup_customer],
+                      ToolWallMiddleware(wall))
+    state = agent.invoke({"messages": [("user", "who")]}, config())
+    assert tool_messages(state)[0].artifact is None

@@ -64,9 +64,14 @@ if result.interruptions:
 ```
 
 Notes:
-- Annotate numbers as `int | float`, not `float`. When the SDK's own type
-  coercion changes an argument (40 becoming 40.0) it holds the call for approval
-  without asking the wall.
+- The SDK holds a call for approval without asking the wall whenever it can't
+  compare the arguments it will run with to the ones the model sent: its own
+  type coercion changed one (annotate numbers `int | float`, not `float`), an
+  optional parameter was left out, a parameter isn't plain data (Enum, datetime,
+  a nested model, a `str` with a pattern), or validation fails. Safe, but every
+  such call waits for a person. After approval the wall still decides.
+- "Always approve" in the SDK is sticky: once a person picks it, later calls to
+  that tool skip approval, even ones the wall would hold. Approve per call.
 - The SDK can't swap the arguments a tool receives, so a call whose arguments
   carry a secret is rejected, not redacted.
 - Already using `function_tool`? Pass `**guardrails(wall, "issue_refund")` to it.
@@ -86,11 +91,24 @@ with wall.context(customer_id="c_42"):
 ```
 
 A `PreToolUse` hook asks the wall. A deny becomes `permissionDecision: "deny"`
-with the reason. An ask becomes `"ask"`, so the SDK asks the user. An allow
-returns no decision, so your permission mode and rules still apply.
+with the reason. An ask becomes `"ask"`, so the SDK asks the user through your
+`can_use_tool` callback; without one the CLI refuses the call. An allow returns
+no decision, so your permission mode and rules still apply. When the wall
+redacted a secret in the arguments (`ToolWall(redact=True)`), the clean
+arguments go to the tool and to the person approving.
 A `PostToolUse` hook replaces secrets in the output with placeholders and keeps
 the output's shape. The SDK ignores a replacement that doesn't match a
 built-in tool's output shape, so withholding would leak.
+
+Limits:
+- When a tool fails (an MCP tool error or exception, Bash exiting non-zero) the
+  SDK fires a failure hook that can't replace what the model sees, so a failing
+  tool's error text reaches the model unscanned. Wrap your own SDK MCP tools
+  with `wall.protect`, which scrubs exception text.
+- The hooks read `wall.context` when the client connects, not per query. Open
+  one client per customer inside `with wall.context(...)`.
+- A held call takes its budget slot when the SDK asks, even if the person then
+  declines.
 
 Every tool the hooks see must be declared to the wall: `wall.rule(name, schema=...)`.
 Use `matcher` to choose which tools are gated. Built-in tools are named `Bash`,
@@ -114,7 +132,9 @@ with wall.context(customer_id="c_42"):
 ```
 
 A denied call becomes a `ToolMessage` with `status="error"`. A held call raises a
-LangGraph interrupt, which needs a checkpointer. Without one, pass
+LangGraph interrupt, which needs a checkpointer. Only `True` approves. With
+several held calls pending, resume each by id:
+`Command(resume={i.id: True for i in state["__interrupt__"]})`. Without one, pass
 `ToolWallMiddleware(wall, approvals=False)` and held calls are refused. Both
 `invoke` and `ainvoke` go through the wall.
 
@@ -134,8 +154,10 @@ async def issue_refund(order_id: str, amount: int | float) -> str: ...
 `guard(wall)` checks every call and turns a deny or a hold into an MCP
 `ToolError` carrying the safe reason. The server still reads the tool's
 signature. MCP has no standard approval flow yet, so a held call is refused
-with a message saying it needs approval. Keep MCP `Context` parameters out of
-guarded tools.
+with a message saying it needs approval, unless you gave the wall an approval
+handler. Set `wall.context(...)` around the server's (or in-process client's)
+lifetime, one server per customer. Keep MCP `Context` parameters out of guarded
+tools.
 
 To gate calls you forward to another MCP server, use `toolwall.MCPGuard`.
 

@@ -181,3 +181,28 @@ def test_sdk_holds_a_call_its_own_coercion_changed():
     model = ScriptedModel("issue_refund", {"order_id": "o_9", "amount": 40})
     result = run(Agent(name="support", model=model, tools=[issue_refund]))
     assert ran == [] and result.interruptions
+
+
+def test_arguments_carrying_a_secret_are_rejected_not_run():
+    # redact mode would clean them, but the SDK can't swap what the tool gets.
+    ran = []
+    wall = ToolWall(redact=True)
+
+    @guard_tool(wall)
+    def note(text: str) -> str:
+        ran.append(text)
+        return "ok"
+
+    model = ScriptedModel("note", {"text": f"key {AWS_KEY}"})
+    run(Agent(name="support", model=model, tools=[note]))
+    assert ran == [] and AWS_KEY not in tool_output_seen(model)
+
+
+def test_approval_check_does_not_spend_the_budget():
+    ran = []
+    wall, tool = make(ran)
+    wall.budget(max_calls=1)
+    model = ScriptedModel("issue_refund", {"order_id": "o_9", "amount": 40})
+    with wall.context(customer_id="c_42"):
+        run(Agent(name="support", model=model, tools=[tool]))
+    assert ran == [("o_9", 40)]  # needs_approval + guardrail took one slot, not two
