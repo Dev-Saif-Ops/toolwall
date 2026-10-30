@@ -14,7 +14,7 @@ person. Everything from 0.4.x keeps working.
   for `ask_if`. Rules compose with `&`, `|` and `~`. They are strict: no string to
   number coercion, `True` is not `1`, NaN and infinity are not numbers, and a rule
   that reads the context fails when the key is not set.
-- Request context: `wall.context(**values)` / `toolwall.context(...)`, built on
+- Request context: `wall.context(**values)` (or `toolwall.context.context(...)`), built on
   `contextvars`, so each thread and asyncio task sees only its own customer.
   Contexts nest. The audit log records which keys were set, never their values.
 - `wall.rule(name, ask_if=, schema=, **constraints)`: the policy for a tool in one
@@ -29,14 +29,39 @@ person. Everything from 0.4.x keeps working.
 - `GateResult.model_reason` and `Decision.reason`: a short reason that is safe to
   send back to the model. It names the argument, never the rule, the allowlist or
   the value; the full reason stays in `reasons`, `Decision.detail` and the audit.
-- The demo runs on the new API and prints what the model is told.
+- The demo runs on the new API, prints what the model is told, and counts a call
+  whose output was withheld as one that ran.
 
 ### Changed
 - README leads with the support-agent example.
+- 300 to 393 tests.
+
+### Security notes
+- A rule or lookup that returns an awaitable fails closed, including inside a
+  composed rule (`a & b`, `a | b`, `~a`).
+- `sql_readonly()` reads the statement in one pass that recognises comments,
+  `'...'`, `"..."`, backtick and `$tag$...$tag$` quoting together, so a quote or
+  comment marker can't hide a second statement. Unterminated quoting and backslash
+  escapes are refused. It does not know which functions have side effects
+  (`pg_sleep`, `nextval`, `lo_import`, `dblink_exec`...): pair it with a read-only
+  database role.
+- `path_under()` matches its deny list case-insensitively (`.ENV` opens `.env` on
+  macOS and Windows) and follows symlinks before checking the root.
+- Model-facing reasons name an argument only when its name is a plain identifier of
+  up to 64 characters; otherwise they say "an argument".
 
 ### Known limits
 - Rules and lookups are synchronous. An async lookup (an async database call)
   fails the rule; async lookups arrive with the framework adapters in 0.6.
+- `decide()` returns "ask" without taking a budget slot, and there is no API yet to
+  run an approved "ask": approval tickets arrive in 0.7. Until then, call
+  `decide()` again after the person approves, or keep approval inside
+  `call()`/`acall()` with an approval handler.
+- `wall.rule()` replaces the tool's whole policy; put every rule for a tool in one
+  call.
+- Request context follows the thread or asyncio task. Work run in a thread pool
+  sees no context (rules deny) unless it is carried over with `asyncio.to_thread`
+  or `contextvars.copy_context().run`.
 
 ## [0.4.3] - 2026-10-30
 

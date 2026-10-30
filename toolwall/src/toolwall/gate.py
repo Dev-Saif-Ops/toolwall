@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import re
 import threading
 import weakref
 from collections.abc import Callable
@@ -34,6 +35,9 @@ from toolwall.shield import Finding, Shield, UnscannableError, scrub_text
 ToolFn = Callable[..., Any]
 DefaultMode = Literal["deny", "allow"]
 ApprovalHandler = Callable[["GateResult"], bool]
+
+
+_SAFE_ARG = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]{0,63}")
 
 
 class Verdict(str, Enum):
@@ -148,7 +152,15 @@ class GateResult:
             return None
         if self.verdict is Verdict.NEEDS_APPROVAL:
             return "This call needs approval from a person before it can run."
-        where = f" '{self.arg}'" if self.arg else ""
+        # Echo the argument's name only when it looks like a plain identifier: the
+        # model chose it, and a long, multi-line or control-character name would
+        # carry injected text back into the conversation.
+        if self.arg and _SAFE_ARG.fullmatch(self.arg):
+            where = f" '{self.arg}'"
+        elif self.arg:
+            where = " an argument"
+        else:
+            where = ""
         messages = {
             "unknown_tool": "This tool is not available.",
             "schema": f"The arguments don't match what this tool accepts{(' (check' + where + ')') if where else ''}.",

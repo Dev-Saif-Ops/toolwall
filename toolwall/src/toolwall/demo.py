@@ -79,7 +79,7 @@ def run_demo(color: bool | None = None, out: Any = None) -> int:
     print(paint(f"toolwall demo: a support agent serving customer {CUSTOMER['id']}", "1"), file=out)
     print(paint("Every verdict below comes from the real gate. No model or API key.\n", "2"), file=out)
 
-    tally = {"ran": 0, "stopped": 0, "held": 0}
+    tally = {"ran": 0, "withheld": 0, "stopped": 0, "held": 0}
     with wall.context(customer_id=CUSTOMER["id"], customer_email=CUSTOMER["email"]):
         results = [(name, args, label, wall.call(name, args)) for name, args, label in SCRIPT]
     for name, args, label, res in results:
@@ -89,7 +89,7 @@ def run_demo(color: bool | None = None, out: Any = None) -> int:
         elif res.blocked:
             tag, note, key = paint("BLOCK", "31;1"), res.reason, "stopped"
         elif res.error:
-            tag, note, key = paint("ALLOW", "32;1"), f"ran, but {res.error}", "stopped"
+            tag, note, key = paint("ALLOW", "32;1"), f"ran, but {res.error}", "withheld"
         else:
             tag, note, key = paint("ALLOW", "32;1"), f"ran: {res.return_value}", "ran"
         tally[key] += 1
@@ -99,7 +99,9 @@ def run_demo(color: bool | None = None, out: Any = None) -> int:
             print(paint(f"         model is told: {res.model_reason}", "2"), file=out)
 
     print(file=out)
-    print(f"{tally['ran']} ran · {tally['stopped']} stopped · {tally['held']} waiting for a human. "
+    ran = tally["ran"] + tally["withheld"]
+    print(f"{ran} ran ({tally['withheld']} with its output withheld) · {tally['stopped']} stopped · "
+          f"{tally['held']} waiting for a human. "
           "The model gets the short reason; the full one goes to the audit log.", file=out)
     print(paint("Source of this demo: python -c \"import toolwall.demo as d; print(d.__file__)\"", "2"), file=out)
     return 0

@@ -234,3 +234,104 @@ def test_ask_if_that_raises_or_is_async_fails_closed():
         wall.rule("issue_refund", ask_if=pred)
         res = wall.call("issue_refund", {"order_id": "o_9", "amount": 1})
         assert res.verdict is Verdict.BLOCK
+
+
+# --- critic round 1 (0.5) ----------------------------------------------------------
+
+import warnings
+
+
+def _quiet(fn):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        return fn()
+
+
+@pytest.mark.parametrize("combine", ["and_left", "and_right", "or", "invert", "wrap"])
+def test_composed_async_check_fails_closed(combine):
+    async def is_theirs(value):
+        return True
+
+    plain = r.max_len(20)
+    rule = {
+        "and_left": lambda: r.Rule(is_theirs, "async") & plain,
+        "and_right": lambda: plain & is_theirs,
+        "or": lambda: r.one_of("never") | is_theirs,
+        "invert": lambda: ~r.Rule(is_theirs, "async"),
+        "wrap": lambda: r.Rule(is_theirs, "async"),
+    }[combine]()
+    ran = []
+    wall = ToolWall()
+    wall.register("issue_refund", lambda order_id: ran.append(order_id),
+                  schema=__import__("toolwall").ToolSchema(required=["order_id"]))
+    wall.rule("issue_refund", order_id=rule)
+    res = _quiet(lambda: wall.call("issue_refund", {"order_id": "o_77"}))
+    if combine == "invert":
+        assert res.blocked  # ~ of an unreadable check is still unreadable: block
+    else:
+        assert res.blocked and ran == []
+
+
+def test_plain_callables_compose_on_either_side():
+    rule = (lambda v: v == "a") | r.one_of("b")
+    assert rule("a") and rule("b") and not rule("c")
+    both = (lambda v: isinstance(v, str)) & r.max_len(2)
+    assert both("ab") and not both("abc")
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT '--', 1; DROP TABLE t",
+    "SELECT '/*'; DROP TABLE t; SELECT '*/'",
+    "SELECT 1 AS \"'\"; DROP TABLE t; SELECT 1 AS \"'\"",
+    "SELECT $$ ' $$; DROP TABLE t; SELECT $$ ' $$",
+    "SELECT $tag$ x $tag$; DROP TABLE t",
+    "SELECT 'it\\'s'; DROP TABLE t; SELECT ''",
+    "SELECT 'unterminated",
+    "SELECT 1 /* unterminated",
+    "SELECT 1; SELECT 2",
+])
+def test_sql_readonly_quoting_bypasses_are_blocked(sql):
+    assert not r.sql_readonly()(sql)
+
+
+def test_sql_readonly_still_allows_quoted_keywords():
+    assert r.sql_readonly()("SELECT 'delete; drop' AS note, \"update\" FROM t WHERE a = 'it''s'")
+
+
+def test_sql_readonly_stacked_queries_really_are_blocked_in_sqlite():
+    import sqlite3
+
+    for sql in ("SELECT '--', 1; DROP TABLE t", "SELECT 1 AS \"'\"; DROP TABLE t; SELECT 1 AS \"'\""):
+        con = sqlite3.connect(":memory:")
+        con.execute("create table t (a)")
+        if r.sql_readonly()(sql):
+            con.executescript(sql)
+        assert con.execute("select count(*) from sqlite_master where name='t'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("name", [".ENV", ".Env", "secret.PEM", "ID_RSA", ".env.LOCAL"])
+def test_path_under_deny_list_ignores_case(tmp_path, name):
+    root = tmp_path / "app"
+    root.mkdir()
+    assert not r.path_under(str(root))(name)
+
+
+def test_path_under_rejects_a_sibling_with_the_same_prefix(tmp_path):
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app2").mkdir()
+    assert not r.path_under(str(tmp_path / "app"))(str(tmp_path / "app2" / "x.txt"))
+
+
+def test_number_rules_compare_exactly():
+    assert not r.at_most(500)(Decimal("500.0000000000000000001"))
+    assert not r.at_most(2**53)(2**53 + 1)
+    assert r.positive()(10**400)
+    assert not r.at_most(10)(10**400)
+
+
+def test_owned_by_is_type_strict():
+    wall = ToolWall()
+    with wall.context(customer_id=1):
+        assert not r.owned_by("customer_id", lookup=lambda _: True)("o")
+        assert not r.owned_by("customer_id", lookup=lambda _: 1.0)("o")
+        assert r.owned_by("customer_id", lookup=lambda _: 1)("o")

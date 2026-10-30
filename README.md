@@ -12,7 +12,7 @@
 > Your support agent can call `issue_refund()`. toolwall decides how much, for which
 > customer, and when a person has to approve, before the call runs.
 
-**Status: v0.5.0 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 362 tests in CI on Python 3.10–3.13 · published attack suite · zero dependencies.**
+**Status: v0.5.0 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 393 tests in CI on Python 3.10–3.13 · published attack suite · zero dependencies.**
 
 ```bash
 pip install toolwall
@@ -73,7 +73,7 @@ Every verdict below comes from the real gate. No model or API key.
          a tool nobody registered: unknown tool: 'drop_all_tables'
          model is told: This tool is not available.
 
-1 ran · 5 stopped · 1 waiting for a human. The model gets the short reason; the full one goes to the audit log.
+2 ran (1 with its output withheld) · 4 stopped · 1 waiting for a human. The model gets the short reason; the full one goes to the audit log.
 ```
 
 ---
@@ -325,7 +325,7 @@ Run the tests and the published attack suite yourself:
 
 ```bash
 cd toolwall && pip install -e ".[dev]"
-pytest                                    # 362 tests
+pytest                                    # 393 tests
 python ../gate-suite/run_suite.py         # 35/35 attacks blocked, prints the G1 report
 ```
 

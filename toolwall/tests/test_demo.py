@@ -11,7 +11,7 @@ def test_demo_verdicts():
     buf = io.StringIO()
     assert run_demo(color=False, out=buf) == 0
     text = buf.getvalue()
-    assert "1 ran · 5 stopped · 1 waiting for a human" in text
+    assert "2 ran (1 with its output withheld) · 4 stopped · 1 waiting for a human" in text
     assert "BLOCK  issue_refund(order_id='o_9', amount=5000.0)" in text
     assert "BLOCK  issue_refund(order_id='o_77', amount=40.0)" in text
     assert "BLOCK  send_email(to='x@evil.com,ops@ourco.com'" in text
@@ -19,7 +19,7 @@ def test_demo_verdicts():
     assert "sk_live_" not in text  # the withheld key never reaches the screen
     # The model-facing reasons never name the rule or the allowlist.
     told = [line for line in text.splitlines() if "model is told:" in line]
-    assert len(told) == 6
+    assert len(told) == 6  # 4 blocks, 1 withheld output, 1 held
     assert not any(word in " ".join(told) for word in ("at_most", "owned_by", "ourco.com", "email_domain"))
 
 

@@ -13,8 +13,15 @@ kind fails rather than being coerced, so "40" is not a number and True is not 1.
 Rules that read the request context (`equals_context`, `owned_by`) fail when the
 key isn't set: no context, no permission.
 
-Rules are synchronous. A lookup that returns an awaitable fails the rule (the
-awaitable is closed); async lookups arrive with the framework adapters.
+Rules are synchronous. A rule or lookup that returns an awaitable fails closed
+(the awaitable is closed); async lookups arrive with the framework adapters.
+
+Context and `~`: a context rule fails when its key is unset, so its negation
+passes then. Write `~equals_context("k")` only when an unset key may pass.
+
+Context follows the thread or asyncio task. Work handed to a thread pool does
+not see it unless you carry it over (`asyncio.to_thread`,
+`contextvars.copy_context().run`); there the rules see no context and deny.
 """
 
 from __future__ import annotations
@@ -49,15 +56,27 @@ class Rule:
         self.__name__ = name
 
     def __call__(self, value: Any) -> bool:
-        return bool(self._fn(value))
+        verdict = self._fn(value)
+        if inspect.isawaitable(verdict):
+            # A coroutine is truthy. Inside a composed rule it would read as a pass,
+            # so raise: the policy turns a raising rule into a block (fail closed).
+            discard_awaitable(verdict)
+            raise TypeError(f"rule {self.__name__} returned an awaitable; rules must be synchronous")
+        return bool(verdict)
 
     def __and__(self, other: Callable[[Any], bool]) -> "Rule":
         other = _as_rule(other)
         return Rule(lambda v: self(v) and other(v), f"({self.__name__} & {other.__name__})")
 
+    def __rand__(self, other: Callable[[Any], bool]) -> "Rule":
+        return _as_rule(other) & self
+
     def __or__(self, other: Callable[[Any], bool]) -> "Rule":
         other = _as_rule(other)
         return Rule(lambda v: self(v) or other(v), f"({self.__name__} | {other.__name__})")
+
+    def __ror__(self, other: Callable[[Any], bool]) -> "Rule":
+        return _as_rule(other) | self
 
     def __invert__(self) -> "Rule":
         return Rule(lambda v: not self(v), f"~{self.__name__}")
@@ -75,15 +94,21 @@ def _as_rule(fn: Callable[[Any], bool]) -> Rule:
 # -- numbers ----------------------------------------------------------------------
 
 
-def _number(value: Any) -> float | None:
-    """A finite real number, or None. bool and numeric strings are not numbers."""
+def _number(value: Any) -> int | float | decimal.Decimal | None:
+    """The value itself when it is a finite real number, else None.
+
+    bool and numeric strings are not numbers. The value is returned unconverted,
+    so comparisons are exact: Python compares int, float and Decimal exactly, and
+    a float conversion would round 2**53 + 1 or Decimal("500.0000000000000000001")
+    onto the limit.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float, decimal.Decimal)):
         return None
-    try:
-        number = float(value)
-    except (OverflowError, ValueError):
+    if isinstance(value, float) and not math.isfinite(value):
         return None
-    return number if math.isfinite(number) else None
+    if isinstance(value, decimal.Decimal) and not value.is_finite():
+        return None
+    return value
 
 
 def at_most(limit: float) -> Rule:
@@ -154,7 +179,8 @@ def owned_by(key: str, *, lookup: Callable[[Any], Any]) -> Rule:
         if inspect.isawaitable(owner):
             discard_awaitable(owner)
             return False
-        return owner is not None and owner == expected
+        # Type-strict like equals_context: True is not 1, and 1.0 is not 1.
+        return owner is not None and type(owner) is type(expected) and owner == expected
 
     return Rule(check, f"owned_by({key!r})")
 
@@ -164,35 +190,69 @@ _UNSET = object()
 
 # -- data access --------------------------------------------------------------------
 
-_SQL_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
-_SQL_STRING = re.compile(r"'(?:[^']|'')*'")
+# One left-to-right pass: every quoted or commented region is recognised together,
+# so a quote inside a comment or a comment marker inside a string can't hide text.
+_SQL_TOKEN = re.compile(
+    r"""
+      (?P<line>--[^\n]*)
+    | (?P<block>/\*.*?\*/)
+    | (?P<squote>'(?:[^'\\]|'')*')
+    | (?P<dquote>"(?:[^"]|"")*")
+    | (?P<bquote>`[^`]*`)
+    | (?P<dollar>\$(?P<tag>[A-Za-z_]\w*)?\$.*?\$(?P=tag)?\$)
+    | (?P<open>/\*|['"`]|\$(?:[A-Za-z_]\w*)?\$|\\)
+    """,
+    re.S | re.X,
+)
 _SQL_WRITE = re.compile(
     r"\b(insert|update|delete|merge|upsert|replace|drop|alter|create|truncate|rename|grant|"
-    r"revoke|attach|detach|copy|call|exec|execute|do|vacuum|reindex|pragma|set|lock|into)\b",
+    r"revoke|attach|detach|copy|call|exec|execute|do|vacuum|reindex|pragma|set|lock|into|"
+    r"load|handler|import)\b",
     re.I,
 )
 
 
+def _sql_code(text: str) -> str | None:
+    """The statement with every string, identifier and comment blanked out, or
+    None when something is unterminated or uses a quoting form we don't model
+    (a backslash escape, an unmatched quote or dollar tag): refuse, don't guess."""
+    out: list[str] = []
+    pos = 0
+    for m in _SQL_TOKEN.finditer(text):
+        out.append(text[pos:m.start()])
+        if m.lastgroup == "open" or (m.lastgroup == "squote" and "\\" in m.group()):
+            return None
+        out.append(" " if m.lastgroup in ("line", "block") else " _ ")
+        pos = m.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def sql_readonly() -> Rule:
     """One read-only statement: starts with SELECT or WITH, no second statement,
-    and no write keyword anywhere (including CTEs like WITH x AS (DELETE ...)).
+    and no write keyword outside strings, quoted names and comments (including
+    CTEs like WITH x AS (DELETE ...)).
 
-    Conservative on purpose: a keyword inside a string literal is ignored, but
-    any write keyword outside one blocks, even where a database would accept it.
-    Pair it with a read-only database role; this rule is a second line, not the
-    only one.
+    Conservative on purpose. Unterminated quotes or comments, backslash escapes
+    and anything it can't tokenise are refused. It does not know which functions
+    have side effects: pg_sleep, nextval, setval, set_config, lo_import,
+    pg_read_file, dblink_exec and pg_terminate_backend all pass. Pair it with a
+    read-only database role; this rule is a second line, not the only one.
     """
 
     def check(value: Any) -> bool:
         if not isinstance(value, str):
             return False
-        text = _SQL_STRING.sub("''", _SQL_COMMENT.sub(" ", value)).strip()
-        text = text[:-1].rstrip() if text.endswith(";") else text
-        if not text or ";" in text:
+        code = _sql_code(value)
+        if code is None:
             return False
-        if not re.match(r"(select|with)\b", text, re.I):
+        code = code.strip()
+        code = code[:-1].rstrip() if code.endswith(";") else code
+        if not code or ";" in code:
             return False
-        return _SQL_WRITE.search(text) is None
+        if not re.match(r"(select|with)\b", code, re.I):
+            return False
+        return _SQL_WRITE.search(code) is None
 
     return Rule(check, "sql_readonly()")
 
@@ -210,14 +270,19 @@ def path_under(root: str, *, deny: tuple[str, ...] = (".env", ".env.*", "*.pem",
         if real != real_root and not real.startswith(real_root + os.sep):
             return False
         parts = os.path.relpath(real, real_root).split(os.sep)
-        return not any(fnmatch.fnmatch(part, pattern) for part in parts for pattern in deny)
+        # Case-insensitive: on macOS and Windows ".ENV" opens ".env".
+        return not any(
+            fnmatch.fnmatchcase(part.casefold(), pattern.casefold())
+            for part in parts for pattern in deny
+        )
 
     return Rule(check, f"path_under({root!r})")
 
 
 def url_host(*hosts: str, schemes: tuple[str, ...] = ("https",)) -> Rule:
     """An absolute URL whose host is exactly one of `hosts`, with an allowed scheme
-    and no user info (user@host hides the real host from careless parsers)."""
+    and no user info (user@host hides the real host from careless parsers).
+    Any port is accepted; pin the port with matches() if it matters."""
     allowed = {h.lower().rstrip(".") for h in hosts}
 
     def check(value: Any) -> bool:

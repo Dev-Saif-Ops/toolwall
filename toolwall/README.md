@@ -67,7 +67,7 @@ Every verdict below comes from the real gate. No model or API key.
          a tool nobody registered: unknown tool: 'drop_all_tables'
          model is told: This tool is not available.
 
-1 ran · 5 stopped · 1 waiting for a human. The model gets the short reason; the full one goes to the audit log.
+2 ran (1 with its output withheld) · 4 stopped · 1 waiting for a human. The model gets the short reason; the full one goes to the audit log.
 ```
 
 It also blocks the generic valid-but-wrong calls an LLM produces:

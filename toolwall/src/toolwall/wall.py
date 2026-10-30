@@ -79,7 +79,9 @@ class OutputCheck:
 
 
 def _decide_only(name: str) -> ToolFn:
-    def run(**_: Any) -> Any:  # never reached: execute() refuses these first
+    # execute() refuses these unless a forwarder is given (MCPGuard forwards to the
+    # server that really runs the tool, after the full check), so this never runs.
+    def run(**_: Any) -> Any:
         raise RuntimeError(f"{name!r} is declared for decide() only")
 
     run.__toolwall_decide_only__ = True  # type: ignore[attr-defined]
