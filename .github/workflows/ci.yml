@@ -31,6 +31,25 @@ jobs:
       - name: No-key demo
         run: python -m toolwall demo --no-color
 
+  integrations:
+    name: framework adapters (OpenAI Agents, Claude Agent SDK, LangChain, MCP)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install with every framework
+        run: python -m pip install -e "./toolwall[dev,integrations]"
+      - name: Adapter tests (must not skip)
+        working-directory: toolwall
+        run: python -m pytest -q -W error::RuntimeWarning -rs tests/integrations | tee /tmp/int.txt && ! grep -q SKIPPED /tmp/int.txt
+      - name: MCP adapter on mcp 1.x
+        working-directory: toolwall
+        run: |
+          python -m pip install "mcp>=1.0,<2"
+          python -m pytest -q -W error::RuntimeWarning -rs tests/integrations/test_mcp.py | tee /tmp/mcp1.txt && ! grep -q SKIPPED /tmp/mcp1.txt
+
   package:
     name: build + metadata check
     runs-on: ubuntu-latest

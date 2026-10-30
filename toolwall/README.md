@@ -205,6 +205,36 @@ print(gate.report())            # verdict counts, blocked reasons, secrets caugh
 print(suggest_policies(gate))   # a draft policy from observed calls, for you to review
 ```
 
+## Plug into your agent framework
+
+```python
+# OpenAI Agents SDK
+from toolwall.integrations.openai_agents import guard_tool
+@guard_tool(wall)
+def issue_refund(order_id: str, amount: int | float) -> str: ...
+
+# Claude Agent SDK
+from toolwall.integrations.claude_agent_sdk import hooks
+options = ClaudeAgentOptions(hooks=hooks(wall, matcher="^mcp__shop__"))
+
+# LangChain / LangGraph
+from toolwall.integrations.langchain import ToolWallMiddleware
+agent = create_agent(model, tools, middleware=[ToolWallMiddleware(wall)], checkpointer=saver)
+
+# MCP server (official Python SDK)
+from toolwall.integrations.mcp import guard
+@server.tool()
+@guard(wall)
+async def issue_refund(order_id: str, amount: int | float) -> str: ...
+```
+
+Denied calls never run and the model gets a short, safe reason. Calls that need
+a person pause through the framework's own approval flow. Tool output is
+checked for secrets before the model sees it. Install with
+`pip install "toolwall[openai-agents]"` (or `claude-agent-sdk`, `langchain`,
+`mcp`, `integrations` for all).
+Full guide: [docs/frameworks.md](https://github.com/Dev-Saif-Ops/toolwall/blob/main/docs/frameworks.md).
+
 ## Guard an MCP server
 
 ```python

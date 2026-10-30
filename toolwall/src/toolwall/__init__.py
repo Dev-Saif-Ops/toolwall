@@ -5,7 +5,7 @@ toolwall guarantees they're allowed.
 """
 
 from toolwall.gate import Gate, GateResult, ToolRegistry, Verdict
-from toolwall.wall import Decision, OutputCheck, ToolWall
+from toolwall.wall import Decision, OutputCheck, ToolBlocked, ToolWall
 from toolwall import context, rules
 from toolwall.intake import IntakeError, ToolCall, parse_tool_calls
 from toolwall.meter import Meter, RunEvent, RunReport, extract_usage
@@ -32,6 +32,7 @@ __all__ = [
     "ToolWall",
     "Decision",
     "OutputCheck",
+    "ToolBlocked",
     "rules",
     "context",
     "Gate",

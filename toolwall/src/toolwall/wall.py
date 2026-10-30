@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 from toolwall import context as _context
 from toolwall.gate import ApprovalHandler, DefaultMode, Gate, GateResult, Verdict
+from toolwall._aio import is_async_callable
 from toolwall.intake import ToolCall
 from toolwall.meter import Meter
 from toolwall.policy import Policy
@@ -76,6 +77,19 @@ class OutputCheck:
     withheld: bool
     reason: str | None = None
     detail: str | None = None
+
+
+class ToolBlocked(Exception):
+    """Raised by @wall.protect when the wall blocks or holds a call. Its message is
+    the model-safe reason."""
+
+
+def _bind(fn: ToolFn, args: tuple, kwargs: dict[str, Any]) -> dict[str, Any]:
+    import inspect
+
+    bound = inspect.signature(fn).bind(*args, **kwargs)
+    bound.apply_defaults()
+    return dict(bound.arguments)
 
 
 def _decide_only(name: str) -> ToolFn:
@@ -223,10 +237,28 @@ class ToolWall:
         context, secrets, budget, approval). An "allow" takes a budget slot, since
         the framework is about to run it. Nothing is executed here.
         """
+        return self._decide(name, args, reserve=True)
+
+    def take_slot(self, decision: Decision) -> Decision:
+        """Take the budget slot for a call a person approved after decide() said
+        "ask". Returns the same decision as "allow", or "deny" when the budget is
+        spent. Adapters call this once the framework's approval says yes.
+        Any other decision comes back unchanged: a "deny" stays denied."""
+        if decision.verdict != "ask":
+            return decision
+        call = ToolCall(name=decision.tool, args=dict(decision.args))
+        reason = self.gate._reserve_budget(call)
+        if reason is None:
+            return Decision("allow", decision.tool, decision.args, None, decision.detail, decision.receipt)
+        probe = GateResult(Verdict.BLOCK, call, [reason], kind="budget")
+        self.gate._record(probe)
+        return Decision("deny", decision.tool, decision.args, probe.model_reason, reason, decision.receipt)
+
+    def _decide(self, name: str, args: dict[str, Any] | None, *, reserve: bool) -> Decision:
         result = self.gate.check({"name": name, "args": args or {}})
         # The gate isn't going to run this result, so it must not hold an issue record.
         self.gate._issued.pop(id(result), None)
-        if result.allowed:
+        if result.allowed and reserve:
             budget_reason = self.gate._reserve_budget(result.call)
             if budget_reason is not None:
                 result = self.gate._refuse(result, budget_reason, kind="budget")
@@ -266,6 +298,54 @@ class ToolWall:
                     "like a secret or couldn't be checked.") if withheld else None,
             detail=probe.error,
         )
+
+    def protect(self, fn: ToolFn | None = None, *, name: str | None = None,
+                error: Callable[[str], BaseException] | None = None) -> Any:
+        """Decorator: every call to the function goes through the wall.
+
+            @wall.protect
+            async def issue_refund(order_id: str, amount: float) -> str: ...
+
+        Registers the function (schema inferred from its annotations unless the
+        tool is already registered) and replaces it with a wrapper of the same
+        signature, so frameworks that read the signature (MCP servers, function
+        tools) still can. A blocked or held call raises ToolBlocked, or the
+        exception `error(model_reason)` returns.
+        """
+        import functools
+
+        def wrap(f: ToolFn) -> ToolFn:
+            tool = name or f.__name__
+            registry = self.gate.registry
+            existing = registry.get(tool)
+            if existing is None:
+                self.register(tool, f)
+            elif getattr(existing, "__toolwall_decide_only__", False):
+                # Declared with wall.rule(schema=...): attach the function, keep
+                # the declared schema and rules.
+                self.gate.register(tool, f, registry.get_schema(tool),
+                                   policy=registry.get_policy(tool), replace=True)
+            make_error = error or ToolBlocked
+
+            def outcome(result: GateResult) -> Any:
+                if not result.allowed or result.error is not None:
+                    raise make_error(result.model_reason or "This call can't be run.")
+                return result.return_value
+
+            if is_async_callable(f):
+                @functools.wraps(f)
+                async def guarded_async(*args: Any, **kwargs: Any) -> Any:
+                    bound = _bind(f, args, kwargs)
+                    return outcome(await self.acall(tool, bound))
+                return guarded_async
+
+            @functools.wraps(f)
+            def guarded(*args: Any, **kwargs: Any) -> Any:
+                bound = _bind(f, args, kwargs)
+                return outcome(self.call(tool, bound))
+            return guarded
+
+        return wrap(fn) if fn is not None else wrap
 
     def check(self, name: str, args: dict[str, Any] | None = None) -> GateResult:
         """Return the verdict without executing anything."""

@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.6.0] - unreleased
+
+ToolWall plugs into the agent frameworks that run tools themselves. Same wall,
+same rules; the framework keeps running the tool.
+
+### Added
+- `toolwall.integrations.openai_agents`: `guard_tool(wall)` and
+  `guardrails(wall, name)` for the OpenAI Agents SDK. Held calls use the SDK's
+  `needs_approval` and resume flow; tool input and output guardrails apply the
+  wall's verdict and the secret scan.
+- `toolwall.integrations.claude_agent_sdk`: `hooks(wall, matcher=)` for the
+  Claude Agent SDK. PreToolUse returns deny or ask, or nothing so your
+  permission rules still apply. PostToolUse redacts secrets and keeps the
+  output's shape.
+- `toolwall.integrations.langchain`: `ToolWallMiddleware(wall)` for
+  `create_agent` (langchain >= 1.0), sync and async. Held calls raise a LangGraph
+  interrupt; resume with `Command(resume=True)` or `False`.
+- `toolwall.integrations.mcp`: `@guard(wall)` for tools on an MCP server built
+  with the official Python SDK (1.x FastMCP and 2.x MCPServer). A blocked call
+  becomes a `ToolError` with the safe reason.
+- `wall.protect`: a decorator for plain Python. It checks every call to the
+  function and raises `ToolBlocked` (or your exception) with the safe reason.
+- `wall.take_slot(decision)`: takes the budget slot for a held call once a
+  person approves it. Any decision other than "ask" comes back unchanged.
+- Install extras: `openai-agents`, `claude-agent-sdk`, `langchain`,
+  `integrations`. The core stays dependency-free.
+- `docs/frameworks.md`, and a CI job that runs every adapter against the real
+  framework (and the MCP adapter on mcp 1.x) and fails if any test is skipped.
+
+### Known limits
+- OpenAI Agents SDK: annotate numbers `int | float`, not `float`. When the SDK's
+  own coercion changes an argument it holds the call for approval without
+  asking the wall (safe, but noisy). Arguments carrying a secret are rejected,
+  since the SDK can't swap them.
+- MCP has no standard approval flow, so a held call is refused with a reason
+  saying it needs approval.
+- Approvals live in memory for one run. Tickets that survive a restart are 0.7.
+
 ## [0.5.0] - unreleased
 
 ToolWall narrows its focus to agents that serve customers, where a tool can move

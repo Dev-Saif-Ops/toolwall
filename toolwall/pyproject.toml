@@ -38,6 +38,10 @@ dependencies = []
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.0.0"]
+openai-agents = ["openai-agents>=0.24"]
+claude-agent-sdk = ["claude-agent-sdk>=0.2"]
+langchain = ["langchain>=1.0", "langgraph>=1.0"]
+integrations = ["mcp>=1.0.0", "openai-agents>=0.24", "claude-agent-sdk>=0.2", "langchain>=1.0", "langgraph>=1.0"]
 dev = ["pytest>=8.0", "pytest-cov>=4.0"]
 
 [project.scripts]
