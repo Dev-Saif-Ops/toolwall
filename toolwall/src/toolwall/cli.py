@@ -1,4 +1,4 @@
-"""toolwall CLI — inspect meter/audit exports."""
+"""toolwall CLI: a no-key demo, and inspecting meter/audit exports."""
 
 from __future__ import annotations
 
@@ -28,9 +28,19 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_demo(args: argparse.Namespace) -> int:
+    from toolwall.demo import run_demo
+
+    return run_demo(color=False if args.no_color else None)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="toolwall", description="toolwall dev tools")
     sub = ap.add_subparsers(dest="command", required=True)
+
+    demo = sub.add_parser("demo", help="Watch the gate stop a support agent's bad tool calls (no API key)")
+    demo.add_argument("--no-color", action="store_true", help="Plain output")
+    demo.set_defaults(func=cmd_demo)
 
     report = sub.add_parser("report", help="Print summary from a Meter JSON export")
     report.add_argument("file", help="Path to meter/audit JSON")
