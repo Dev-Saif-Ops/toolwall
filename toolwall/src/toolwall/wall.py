@@ -25,7 +25,7 @@ from typing import Any
 from toolwall.gate import ApprovalHandler, DefaultMode, Gate, GateResult
 from toolwall.meter import Meter
 from toolwall.policy import Policy
-from toolwall.schema import ToolSchema
+from toolwall.schema import ToolSchema, fully_annotated
 from toolwall.shield import Shield
 
 ToolFn = Callable[..., Any]
@@ -65,9 +65,19 @@ class ToolWall:
         *,
         schema: ToolSchema | None = None,
         policy: Policy | None = None,
-        infer_schema: bool = False,
+        infer_schema: bool | None = None,
         replace: bool = False,
     ) -> "ToolWall":
+        """Register a tool. Registration is the allowlist.
+
+        With no schema, a function whose every parameter and return value are
+        annotated gets its schema from its signature (required args, types, no
+        unknown args). Anything less (a lambda, a partly annotated function) still
+        needs a schema: under default deny it is blocked until it has one.
+        infer_schema=False opts out.
+        """
+        if infer_schema is None:
+            infer_schema = schema is None and fully_annotated(fn)
         self.gate.register(
             name, fn, schema, policy=policy, infer_schema=infer_schema, replace=replace
         )

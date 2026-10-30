@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,6 +39,35 @@ class ToolSchema:
         return errors
 
 
+def _signature(fn: Any) -> inspect.Signature:
+    # eval_str resolves string annotations (modules using `from __future__ import
+    # annotations`), so types are enforced there too. Fall back if one can't resolve.
+    try:
+        return inspect.signature(fn, eval_str=True)
+    except (NameError, TypeError, SyntaxError):
+        return inspect.signature(fn)
+
+
+def fully_annotated(fn: Any) -> bool:
+    """True when every named parameter and the return value carry a resolvable
+    annotation and the callable takes no **kwargs: the author declared the whole
+    signature, so it can stand in for a schema. A bare `lambda` never qualifies."""
+    try:
+        sig = _signature(fn)
+    except (TypeError, ValueError):
+        return False
+    named = [
+        p for name, p in sig.parameters.items()
+        if name not in ("self", "cls") and p.kind is not p.VAR_POSITIONAL
+    ]
+    if any(p.kind is p.VAR_KEYWORD for p in named):
+        return False
+    if sig.return_annotation is inspect.Signature.empty:
+        return False
+    # Parameter.empty is itself a class, so test for it before isinstance(type).
+    return all(p.annotation is not p.empty and isinstance(p.annotation, type) for p in named)
+
+
 def schema_from_signature(fn: Any, *, required: list[str] | None = None) -> ToolSchema:
     """Best-effort schema from a callable signature (stdlib inspect).
 
@@ -49,9 +79,7 @@ def schema_from_signature(fn: Any, *, required: list[str] | None = None) -> Tool
     The exception is a callable that declares **kwargs: it genuinely accepts
     arguments we cannot enumerate, so extras stay allowed there.
     """
-    import inspect
-
-    sig = inspect.signature(fn)
+    sig = _signature(fn)
     req: list[str] = []
     opt: list[str] = []
     types: dict[str, type | tuple[type, ...]] = {}
