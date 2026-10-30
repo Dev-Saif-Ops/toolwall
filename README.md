@@ -223,8 +223,11 @@ return a materialised list instead.
 A function whose parameters and return value are all annotated gets its schema
 from its signature: classes, `X | None`, `Optional`, `Union`, generic containers
 (`list[str]` checks for a list), `Any` and `Annotated[...]`; `float` also accepts an
-integer. Anything else (`Literal`, `TypedDict`, a `Protocol`, a lambda, a partly
-annotated function) still needs `schema=`, for example `types={"filters": dict}`.
+integer. Anything else (`Literal`, `TypedDict`, a non-runtime `Protocol`, a lambda,
+a partly annotated function) still needs `schema=`, for example
+`types={"filters": dict}`. A parameter annotated with a class JSON can't produce (a
+dataclass, an Enum, a pydantic model) is inferred but blocks every call; give it an
+explicit `schema=` with `dict` or `str`.
 
 
 Two policy details worth knowing: `matches()` is a full match (anchor nothing, the

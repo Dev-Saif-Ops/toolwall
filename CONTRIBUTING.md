@@ -41,7 +41,7 @@ pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-Currently 155 tests.
+Currently 300 tests, run in CI on Python 3.10 to 3.13.
 
 The attack suite is separate, and it is what every public claim about toolwall
 cites:

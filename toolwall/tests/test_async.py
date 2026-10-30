@@ -422,15 +422,14 @@ def test_mcp_sync_handle_with_async_forward_is_not_forwarded():
 
 
 def test_class_defining_only_aiter_is_withheld():
-    class Stream:
+    # A dict subclass, so the only thing that can withhold it is the __aiter__
+    # check: a plain object would be withheld as opaque anyway.
+    class StreamingMapping(dict):
         def __aiter__(self):
             return self
 
-        async def __anext__(self):
-            raise StopAsyncIteration
-
     gate = Gate(default="allow", shield=Shield(mode="block"))
-    gate.register("t", lambda: Stream())
+    gate.register("t", lambda: StreamingMapping(city="Riyadh"))
     assert gate.run({"name": "t", "args": {}}).return_value is None
 
 
@@ -473,6 +472,7 @@ def test_cross_rule_list_with_a_coroutine_fails_closed_without_warnings():
                   policy=Policy(cross=cross))
     result = no_unawaited_coroutines(lambda: wall.call("t", {"x": 1}))
     assert ran == [] and result.verdict is Verdict.BLOCK
+    assert "returned an awaitable" in result.reason
 
 
 def test_cancelled_async_approval_leaves_no_issue_record():
