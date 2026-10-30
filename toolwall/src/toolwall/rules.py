@@ -224,11 +224,15 @@ _SQL_WRITE = re.compile(
     r"\b(insert|update|delete|merge|upsert|replace|drop|alter|create|truncate|rename|grant|"
     r"revoke|attach|detach|copy|call|exec|execute|do|vacuum|reindex|pragma|set|lock|into|"
     r"load|handler|import|outfile|dumpfile|"
-    # SQL Server ends a statement without ';', so its statement verbs can start a
-    # second statement mid-text: refuse them anywhere.
+    # SQL Server ends a statement without ';', so a statement verb can start a
+    # second statement mid-text. Best effort: the T-SQL verbs below are refused
+    # anywhere; a verb missing here is not (OPEN, CLOSE, IF are left out because
+    # they are common names). On SQL Server the read-only role is the real control.
     r"shutdown|kill|backup|restore|dbcc|deny|checkpoint|waitfor|use|begin|commit|"
     r"rollback|disable|enable|receive|send|declare|deallocate|raiserror|throw|goto|"
-    r"print|reconfigure|bulk|openrowset|opendatasource|openquery|xp_\w+|sp_\w+)\b",
+    r"print|reconfigure|bulk|openrowset|opendatasource|openquery|while|return|break|"
+    r"continue|setuser|revert|writetext|updatetext|readtext|fetch|save|add|"
+    r"xp_\w+|sp_\w+)\b",
     re.I,
 )
 
@@ -256,12 +260,19 @@ def sql_readonly() -> Rule:
     Refused, because databases disagree about them and a disagreement is where a
     second statement hides: comments of any kind, backslashes, $ (dollar quoting
     and $1 placeholders), #, @ and : (sqlite variables, MySQL @vars, Postgres ::
-    casts), [brackets], `backticks`, \r, NUL, and non-ASCII outside quotes. SQL
-    Server statement verbs (SHUTDOWN, KILL, BACKUP, DBCC, WAITFOR, BEGIN...) are
-    refused anywhere, because T-SQL needs no ';' between statements. Ordinary
-    LLM-written reads fit the subset; anything else is a false block, by design,
-    including columns named like a write keyword (load, lock, set, use...) and
-    replace() as a string function.
+    casts), [brackets], `backticks`, \r, NUL, and non-ASCII outside quotes.
+
+    SQL Server needs no ';' between statements, so "one statement" can't be
+    promised there. A named list of T-SQL verbs (SHUTDOWN, KILL, BACKUP, DBCC,
+    WAITFOR, WHILE, BEGIN, SETUSER, WRITETEXT, ADD... and any xp_ or sp_ name) is
+    refused anywhere outside quotes; it is best effort, and a verb not on it
+    (OPEN, CLOSE and IF are left off as common names) still passes. On SQL Server
+    the read-only role and a statement timeout are the real control.
+
+    Ordinary LLM-written reads fit the subset; anything else is a false block, by
+    design, including unquoted columns named like a keyword (load, lock, set, use,
+    print, add, save, and names starting xp_ or sp_; write them "quoted" to pass)
+    and replace() as a string function.
 
     It does not know which functions have side effects: pg_sleep, nextval, setval,
     set_config, lo_import, pg_read_file, dblink_exec and pg_terminate_backend all

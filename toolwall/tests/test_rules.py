@@ -437,7 +437,7 @@ def test_decimal_infinity_is_not_a_number():
     "SELECT 1 WAITFOR DELAY '01:00:00'",
     "SELECT 1 DISABLE TRIGGER ALL ON orders",
     "SELECT 'a\\\\b'",                       # backslash inside '...'
-    "SELECT 1\\x00",
+    "SELECT 1\x00",                       # NUL outside quotes
     "SELECT \\\\1",
     "SELECT café FROM t",                    # non-ASCII outside quotes
     "COMMENT ON TABLE t IS 'x'",
@@ -452,11 +452,14 @@ def test_sql_readonly_tcl_variables_do_not_drop_tables_in_sqlite():
     import sqlite3
 
     con = sqlite3.connect(":memory:")
-    con.execute("create table orders (id)")
-    sql = "SELECT @a('); DROP TABLE orders; SELECT @a(')"
-    if r.sql_readonly()(sql):
-        con.executescript(sql)
-    assert con.execute("select count(*) from sqlite_master where name='orders'").fetchone()[0] == 1
+    try:
+        con.execute("create table orders (id)")
+        sql = "SELECT @a('); DROP TABLE orders; SELECT @a(')"
+        if r.sql_readonly()(sql):
+            con.executescript(sql)
+        assert con.execute("select count(*) from sqlite_master where name='orders'").fetchone()[0] == 1
+    finally:
+        con.close()
 
 
 @pytest.mark.parametrize("lazy", ["future", "generator", "asyncgen"])
@@ -501,3 +504,46 @@ def test_negated_context_rules_block_when_the_context_is_missing(rule):
     wall.register("t", lambda x: "ran", schema=__import__("toolwall").ToolSchema(required=["x"]))
     wall.rule("t", x=rule())
     assert wall.call("t", {"x": "anything"}).blocked  # no context set at all
+
+
+TSQL_VERBS = (
+    "shutdown kill backup restore dbcc deny checkpoint waitfor use begin commit rollback "
+    "disable enable receive send declare deallocate raiserror throw goto print reconfigure "
+    "bulk openrowset opendatasource openquery while return break continue setuser revert "
+    "writetext updatetext readtext fetch save add xp_cmdshell sp_configure"
+).split()
+
+
+@pytest.mark.parametrize("verb", TSQL_VERBS)
+def test_sql_readonly_refuses_each_tsql_verb_mid_statement(verb):
+    # T-SQL needs no ';': "SELECT 1 <verb> ..." is two statements there.
+    assert r.sql_readonly()("SELECT 1 FROM t")
+    assert not r.sql_readonly()(f"SELECT 1 FROM t {verb} x")
+    assert not r.sql_readonly()(f"SELECT 1 FROM t {verb.upper()} x")
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT 1 FROM t WHERE x = 'while'",     # inside a string
+    'SELECT "add", "open" FROM t',           # quoted identifiers
+    "SELECT open, close FROM prices",        # left off the list on purpose
+])
+def test_sql_readonly_tsql_list_spares_quoted_and_common_names(sql):
+    assert r.sql_readonly()(sql)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT 1 FROM t */",
+    "SELECT 1 FROM t;;",
+    "SELECT 1 FROM t INTO OUTFILE '/tmp/x'",
+    "SELECT 1 FROM t INTO DUMPFILE '/tmp/x'",
+    "SELECT 'a\x00' FROM t",                 # NUL inside quotes
+    "SELECT 'a\rb' FROM t",                  # CR inside quotes
+])
+def test_sql_readonly_more_refused_forms(sql):
+    assert not r.sql_readonly()(sql)
+
+
+def test_sql_readonly_doubled_quotes_stay_inside_the_string():
+    assert r.sql_readonly()("SELECT 'it''s' FROM t")
+    assert r.sql_readonly()('SELECT "a""b" FROM t')
+    assert not r.sql_readonly()("SELECT 'it''; DROP TABLE t; --' FROM t; DROP TABLE t")
