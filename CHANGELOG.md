@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.5.0] - unreleased
+
+ToolWall narrows its focus to agents that serve customers, where a tool can move
+money, change an account or contact someone: business rules on the arguments,
+the customer the agent is acting for, and approvals for the calls that need a
+person. Everything from 0.4.x keeps working.
+
+### Added
+- `toolwall.rules`: `at_most`, `at_least`, `between`, `positive`, `one_of`
+  (type-exact), `max_len`, `matches`, `email_domain`, `equals_context`,
+  `owned_by(key, lookup=)`, `sql_readonly`, `path_under`, `url_host`, and `over()`
+  for `ask_if`. Rules compose with `&`, `|` and `~`. They are strict: no string to
+  number coercion, `True` is not `1`, NaN and infinity are not numbers, and a rule
+  that reads the context fails when the key is not set.
+- Request context: `wall.context(**values)` / `toolwall.context(...)`, built on
+  `contextvars`, so each thread and asyncio task sees only its own customer.
+  Contexts nest. The audit log records which keys were set, never their values.
+- `wall.rule(name, ask_if=, schema=, **constraints)`: the policy for a tool in one
+  line. With `schema=` and no registered function, the tool is declared for
+  `decide()` only, and `call()` refuses to run it.
+- `Policy.ask_if`: when it returns True, a call that passes every rule becomes
+  `NEEDS_APPROVAL`. Raising or returning an awaitable fails closed.
+- `wall.decide()` / `adecide()`: the verdict (`"allow"`, `"deny"` or `"ask"`) for a
+  call your framework will run, with the checked arguments (redacted when the wall
+  redacts) and the receipt. An allow takes a budget slot atomically.
+- `wall.check_output(name, value)`: scan what a tool your framework ran returned.
+- `GateResult.model_reason` and `Decision.reason`: a short reason that is safe to
+  send back to the model. It names the argument, never the rule, the allowlist or
+  the value; the full reason stays in `reasons`, `Decision.detail` and the audit.
+- The demo runs on the new API and prints what the model is told.
+
+### Changed
+- README leads with the support-agent example.
+
+### Known limits
+- Rules and lookups are synchronous. An async lookup (an async database call)
+  fails the rule; async lookups arrive with the framework adapters in 0.6.
+
 ## [0.4.3] - 2026-10-30
 
 Fixes from an adoption audit that walked the path a new user takes into a real,

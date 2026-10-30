@@ -7,31 +7,40 @@
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](toolwall/pyproject.toml)
 [![Failure suite](https://img.shields.io/badge/attack%20suite-35%2F35%20blocked-brightgreen.svg)](gate-suite/results/REPORT.md)
 
-> ## The security gateway for AI agent tool calls.
+> ## Business rules for your AI agent's tool calls.
 >
-> Your LLM can generate a **valid** tool call. That doesn't mean it's **safe** to execute.
+> Your support agent can call `issue_refund()`. toolwall decides how much, for which
+> customer, and when a person has to approve, before the call runs.
 
-**Status: v0.4.3 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 300 tests in CI on Python 3.10–3.13 · published attack suite.**
+**Status: v0.5.0 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 362 tests in CI on Python 3.10–3.13 · published attack suite · zero dependencies.**
 
 ```bash
 pip install toolwall
 ```
 
 ```python
-from toolwall import ToolWall, Policy, ToolSchema
+from toolwall import ToolWall, rules as r
 
-wall = ToolWall()   # default-deny, secret detection + audit on
-wall.register("delete_user", delete_user,
-              schema=ToolSchema(required=["user_id"]),
-              policy=Policy(require_approval=True))
+wall = ToolWall()                               # default-deny, secret detection + audit on
+wall.register("issue_refund", issue_refund)     # schema from the type hints
+wall.rule("issue_refund",
+    amount=r.positive() & r.at_most(500),
+    order_id=r.owned_by("customer_id", lookup=orders.owner_of),
+    ask_if=r.over("amount", 200))               # above this, a person approves
 
-result = wall.call("delete_user", {"user_id": "123"})
-
-# result.needs_approval -> True   (held; a human must say yes before it runs)
-# result.reason         -> "approval required for 'delete_user'"
+with wall.context(customer_id="c_42"):          # who the agent is acting for
+    wall.call("issue_refund", {"order_id": "o_9",  "amount": 40})    # runs
+    wall.call("issue_refund", {"order_id": "o_77", "amount": 40})    # blocked: not their order
+    wall.call("issue_refund", {"order_id": "o_9",  "amount": 300})   # held for a person
 ```
 
-The tool never ran. Every decision is in the audit log.
+**Your framework runs the tools?** Ask for a verdict instead, from its "before tool" hook:
+
+```python
+d = wall.decide("issue_refund", args)   # d.verdict: "allow" | "deny" | "ask"
+d.reason   # safe to send to the model: names the argument, never the rule
+d.detail   # the full reason, for your logs and the audit trail
+```
 
 **See it in 30 seconds, no API key:**
 
@@ -46,19 +55,25 @@ Every verdict below comes from the real gate. No model or API key.
   ALLOW  issue_refund(order_id='o_9', amount=40.0)
          an honest refund: ran: refunded 40.00 on o_9
   BLOCK  issue_refund(order_id='o_9', amount=5000.0)
-         a refund over the cap: policy violation: arg 'amount' rejected by in_range(0.01, 500)
+         a refund over the cap: policy violation: arg 'amount' rejected by (positive() & at_most(500))
+         model is told: The value for 'amount' isn't allowed for this call.
   BLOCK  issue_refund(order_id='o_77', amount=40.0)
-         someone else's order: order does not belong to the signed-in customer
+         someone else's order: policy violation: arg 'order_id' rejected by owned_by('customer_id')
+         model is told: The value for 'order_id' isn't allowed for this call.
   BLOCK  send_email(to='x@evil.com,ops@ourco.com', body='export')
-         a smuggled recipient: policy violation: arg 'to' rejected by customer_or_ourco
+         a smuggled recipient: policy violation: arg 'to' rejected by (email_domain('ourco.com',) | equals_context('customer_email'))
+         model is told: The value for 'to' isn't allowed for this call.
   ALLOW  lookup_customer(customer_id='c_42')
          a lookup whose record holds a key: ran, but tool output withheld: secret detected (stripe-key) in 'return.billing_api_key'
+         model is told: The tool ran, but its output can't be shown.
   HELD   close_account(customer_id='c_42')
          a destructive action: waiting for a human to approve
+         model is told: This call needs approval from a person before it can run.
   BLOCK  drop_all_tables()
          a tool nobody registered: unknown tool: 'drop_all_tables'
+         model is told: This tool is not available.
 
-1 ran · 5 stopped · 1 waiting for a human. Every decision is in the audit log (wall.export).
+1 ran · 5 stopped · 1 waiting for a human. The model gets the short reason; the full one goes to the audit log.
 ```
 
 ---
@@ -127,7 +142,11 @@ Everything that isn't explicitly allowed is blocked. That is the whole idea.
 ## Features
 
 - **Fail-closed by default**: unknown tool, bad schema, policy violation, budget hit, or unparseable payload all block *before* the tool runs. Registration is the allowlist.
-- **Policy engine**: value constraints (`in_range`, `one_of`, `matches`, `email_domain`, `starts_with`, `ends_with`), cross-argument rules, human-approval flags, and budget caps (per run / per tool / USD) that hold on a Gate shared across threads.
+- **Business rules** (`toolwall.rules`): `at_most`, `between`, `positive`, `one_of`, `owned_by` (the record belongs to the customer the agent serves), `equals_context`, `email_domain`, `sql_readonly`, `path_under`, `url_host`, composed with `&`, `|` and `~`. Strict by design: `"40"` is not a number, `True` is not `1`, and a rule that needs context fails when it isn't set.
+- **Request context**: `with wall.context(customer_id=...)` makes the customer visible to rules in this thread or asyncio task only. The audit records which keys were set, never their values.
+- **Approvals that bind the exact call**: `ask_if=r.over("amount", 200)` holds a call for a person; the call that runs after approval is the one that was checked.
+- **Verdicts for any framework**: `decide()` returns allow / deny / ask for a tool your framework runs, and `check_output()` scans what it returned. Model-facing reasons name the argument, never the rule.
+- **Policy engine underneath**: per-argument rules, cross-argument rules, and budget caps (per run / per tool / USD) that hold on a Gate shared across threads.
 - **Secret detection, both directions**: AWS, OpenAI, GitHub, Stripe, Slack, JWT, PEM, and high-entropy strings caught in tool arguments *and in tool return values* (strings, dict keys and values, lists, tuples such as database rows, sets, bytes, dataclasses), then blocked or redacted. Output that cannot be scanned, including lazy iterables such as generators, cursors and file objects, is withheld, as are objects it cannot read whole (XML elements, pydantic models, numpy arrays): return plain, materialised data. Treat output scanning as defence in depth for that data. Redaction rebuilds only what held a secret and never modifies the tool's own objects. Reasons, reports and the audit log are scrubbed of detected secrets.
 - **Dry-run**: run your whole agent with nothing executing, then read what it *would* have done and generate a starter policy from it.
 - **MCP guard**: `MCPGuard` runs the same check and execute path (budget, dry-run, receipts, output scanning) in front of a function that forwards to your MCP server.
@@ -306,7 +325,7 @@ Run the tests and the published attack suite yourself:
 
 ```bash
 cd toolwall && pip install -e ".[dev]"
-pytest                                    # 300 tests
+pytest                                    # 362 tests
 python ../gate-suite/run_suite.py         # 35/35 attacks blocked, prints the G1 report
 ```
 
