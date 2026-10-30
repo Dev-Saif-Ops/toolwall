@@ -61,6 +61,13 @@ def _reject(name: str) -> Any:
     raise ValueError(name)
 
 
+def _approved_in_sdk(ctx: Any) -> bool:
+    try:
+        return ctx.is_tool_approved(ctx.tool_name, ctx.tool_call_id) is True
+    except Exception:
+        return False
+
+
 def guardrails(wall: "ToolWall", tool_name: str | None = None) -> dict[str, Any]:
     """function_tool(**guardrails(wall, "issue_refund")): input and output
     guardrails, plus needs_approval when the tool's name is given.
@@ -80,9 +87,13 @@ def guardrails(wall: "ToolWall", tool_name: str | None = None) -> dict[str, Any]
         if args is None:
             return ToolGuardrailFunctionOutput.reject_content(_MALFORMED)
         decision = wall.decide(ctx.tool_name, args)
-        if decision.needs_approval and approvals:
-            # Input guardrails run after the SDK's approval: a person said yes.
+        if decision.needs_approval and approvals and _approved_in_sdk(ctx):
+            # A person approved exactly this call through the SDK.
             decision = wall.take_slot(decision)
+        elif decision.needs_approval:
+            # Held, and no person approved this call (e.g. the approved ticket the
+            # SDK's check saw was used up in the meantime): it doesn't run.
+            return ToolGuardrailFunctionOutput.reject_content(decision.reason or "This call needs approval.")
         if not decision.allowed:
             return ToolGuardrailFunctionOutput.reject_content(decision.reason or "This call isn't allowed.")
         if decision.args != args:

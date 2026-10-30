@@ -279,3 +279,143 @@ def test_arun_approved_awaits_an_async_tool():
     wall.approvals.approve(decision.ticket, by="ops")
     result = asyncio.run(wall.arun_approved(decision.ticket))
     assert result.allowed and result.return_value == "sent" and ran == [5]
+
+
+@pytest.fixture(params=["memory", "sqlite"])
+def store(request, tmp_path):
+    if request.param == "memory":
+        yield approvals_mod.MemoryStore()
+        return
+    s = SQLiteStore(str(tmp_path / "t.db"))
+    yield s
+    s.close()
+
+
+def test_expiry_is_enforced_by_every_store(store, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(approvals_mod.time, "time", lambda: clock[0])
+    wall, _, ran = refund_wall(approvals=Approvals(store, ttl=60))
+    late = held(wall, {"order_id": "o_9", "amount": 300})
+    clock[0] += 60  # exactly at expiry
+    with pytest.raises(TicketError):
+        wall.approvals.approve(late, by="ops")
+    with wall.context(customer_id="c_42"):
+        fresh = wall.call("issue_refund", {"order_id": "o_9", "amount": 300}).ticket
+    assert fresh != late  # an expired ticket isn't found again
+    wall.approvals.approve(fresh, by="ops")
+    clock[0] += 60
+    assert not wall.approvals.redeem(wall.approvals.store.get(fresh))
+    with pytest.raises(TicketError):
+        wall.run_approved(fresh)
+    assert ran == []
+
+
+def test_the_newest_live_ticket_is_the_one_found(store, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(approvals_mod.time, "time", lambda: clock[0])
+    approvals = Approvals(store, ttl=60)
+    first = approvals.open("t", {"a": 1}, {}, None)
+    approvals.deny(first.id, by="ops")
+    clock[0] += 61
+    second = approvals.open("t", {"a": 1}, {}, None)
+    clock[0] += 1
+    assert approvals.lookup("t", {"a": 1}, {}).id == second.id
+
+
+def test_redeem_is_atomic_in_every_store(store):
+    approvals = Approvals(store)
+    ticket = approvals.open("t", {"a": 1}, {}, None)
+    approvals.approve(ticket.id, by="ops")
+    approved = store.get(ticket.id)
+    start = threading.Barrier(16)
+    wins = []
+
+    def go():
+        start.wait()
+        wins.append(approvals.redeem(approved))
+
+    threads = [threading.Thread(target=go) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert wins.count(True) == 1
+
+
+def test_sqlite_drops_tickets_a_day_past_expiry(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(approvals_mod.time, "time", lambda: clock[0])
+    store = SQLiteStore(str(tmp_path / "t.db"))
+    approvals = Approvals(store, ttl=60)
+    old = approvals.open("t", {"a": 1}, {}, None)
+    clock[0] += 60 + 86400 + 1
+    approvals.open("t", {"a": 2}, {}, None)
+    assert store.get(old.id) is None
+    store.close()
+
+
+def test_an_approved_ticket_that_cannot_be_redeemed_does_not_run():
+    wall, _, ran = refund_wall()
+    ticket = held(wall, {"order_id": "o_9", "amount": 300})
+    wall.approvals.approve(ticket, by="ops")
+    wall.approvals.redeem = lambda t: False  # used up by someone else meanwhile
+    with wall.context(customer_id="c_42"):
+        result = wall.call("issue_refund", {"order_id": "o_9", "amount": 300})
+    assert result.blocked and ran == []
+
+
+def test_a_ticket_allow_through_decide_counts_against_the_budget():
+    wall, _, _ = refund_wall()
+    wall.budget(max_calls=1)
+    with wall.context(customer_id="c_42"):
+        first = wall.decide("issue_refund", {"order_id": "o_9", "amount": 300})
+        wall.approvals.approve(first.ticket, by="ops")
+        assert wall.decide("issue_refund", {"order_id": "o_9", "amount": 300}).allowed
+        assert wall.decide("issue_refund", {"order_id": "o_9", "amount": 40}).denied
+
+
+def test_a_context_that_cannot_be_fingerprinted_still_reaches_the_handler():
+    asked = []
+    wall, _, ran = refund_wall(approval=lambda result: asked.append(1) or True)
+    with wall.context(customer_id="c_42", user=object()):
+        result = wall.call("issue_refund", {"order_id": "o_9", "amount": 300})
+    assert result.allowed and asked == [1] and ran == [("o_9", 300)]
+
+
+def test_a_framework_approval_settles_the_ticket():
+    wall, _, ran = refund_wall()
+    with wall.context(customer_id="c_42"):
+        held_call = wall.decide("issue_refund", {"order_id": "o_9", "amount": 300})
+        assert wall.take_slot(held_call).allowed
+    assert wall.approvals.get(held_call.ticket).status == "used"
+    assert wall.approvals.pending() == []
+    with pytest.raises(TicketError):
+        wall.approvals.approve(held_call.ticket, by="ops")
+    # a second framework approval of the same, already settled, decision
+    assert wall.take_slot(held_call).denied
+
+
+def test_a_framework_decline_denies_the_ticket():
+    wall, _, _ = refund_wall()
+    with wall.context(customer_id="c_42"):
+        held_call = wall.decide("issue_refund", {"order_id": "o_9", "amount": 300})
+    wall.decline(held_call)
+    assert wall.approvals.get(held_call.ticket).status == "denied"
+
+
+def test_run_approved_refuses_before_using_up_the_ticket():
+    wall = ToolWall()
+
+    @wall.protect
+    async def wire(amount: int) -> str:
+        return "sent"
+
+    wall.rule("wire", require_approval=True)
+    ticket = wall.decide("wire", {"amount": 5}).ticket
+    wall.approvals.approve(ticket, by="ops")
+    with pytest.raises(TicketError):
+        wall.run_approved(ticket)  # async tool, sync run
+    wall.dry_run = True
+    with pytest.raises(TicketError):
+        asyncio.run(wall.arun_approved(ticket))
+    assert wall.approvals.get(ticket).status == "approved"

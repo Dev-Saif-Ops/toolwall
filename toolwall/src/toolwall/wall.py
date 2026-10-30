@@ -249,17 +249,17 @@ class ToolWall:
         once. Every other check runs again first (rules see the ticket's context;
         a rule that now fails still blocks). Raises TicketError when the ticket
         isn't approved, has expired or was already used."""
-        ticket = self._approved_ticket(ticket_id)
+        ticket = self._approved_ticket(ticket_id, sync=True)
         with _context.exactly(**ticket.context):
             return self.call(ticket.tool, ticket.args)
 
     async def arun_approved(self, ticket_id: str) -> GateResult:
         """run_approved() for async tools."""
-        ticket = self._approved_ticket(ticket_id)
+        ticket = self._approved_ticket(ticket_id, sync=False)
         with _context.exactly(**ticket.context):
             return await self.acall(ticket.tool, ticket.args)
 
-    def _approved_ticket(self, ticket_id: str) -> Any:
+    def _approved_ticket(self, ticket_id: str, *, sync: bool) -> Any:
         if self.approvals is None:
             raise TicketError("approval tickets are off for this wall")
         ticket = self.approvals.get(ticket_id)
@@ -269,6 +269,15 @@ class ToolWall:
             raise TicketError(f"ticket {ticket_id!r} is {ticket.status}, not approved")
         if not self.approvals._intact(ticket, ticket.digest):
             raise TicketError(f"ticket {ticket_id!r} was changed after it was opened")
+        # Refuse here what execute would refuse after the ticket is used up.
+        tool = self.gate.registry.get(ticket.tool)
+        if tool is None or getattr(tool, "__toolwall_decide_only__", False):
+            raise TicketError(f"{ticket.tool!r} isn't run by this wall: approve it, and let "
+                              "the framework retry the call")
+        if sync and is_async_callable(tool):
+            raise TicketError(f"{ticket.tool!r} is async: use arun_approved()")
+        if self.gate.dry_run:
+            raise TicketError("the wall is in dry-run mode: nothing runs")
         return ticket
 
     def decide(self, name: str, args: dict[str, Any] | None = None) -> Decision:
@@ -287,6 +296,16 @@ class ToolWall:
         Any other decision comes back unchanged: a "deny" stays denied."""
         if decision.verdict != "ask":
             return decision
+        if decision.ticket is not None and self.approvals is not None:
+            # The person approved through the framework: close the ticket so the
+            # queue can't approve and run the same call a second time.
+            if not self.approvals.close(decision.ticket, "used"):
+                ticket = self.approvals.get(decision.ticket)
+                if ticket is not None and ticket.status in ("used", "denied"):
+                    reason = f"approval ticket is already {ticket.status}"
+                    return Decision("deny", decision.tool, decision.args,
+                                    "This call was already handled.", reason,
+                                    decision.receipt, decision.ticket)
         call = ToolCall(name=decision.tool, args=dict(decision.args))
         reason = self.gate._reserve_budget(call)
         if reason is None:
@@ -296,6 +315,12 @@ class ToolWall:
         self.gate._record(probe)
         return Decision("deny", decision.tool, decision.args, probe.model_reason, reason,
                         decision.receipt, decision.ticket)
+
+    def decline(self, decision: Decision, *, by: str = "framework") -> None:
+        """A person declined a held call through the framework: deny its ticket,
+        so it can't be approved and run later from the queue."""
+        if decision.ticket is not None and self.approvals is not None:
+            self.approvals.close(decision.ticket, "denied", by=by)
 
     def _decide(self, name: str, args: dict[str, Any] | None, *, reserve: bool) -> Decision:
         result = self.gate.check({"name": name, "args": args or {}})

@@ -768,10 +768,13 @@ class Gate:
         runs (once); one with a denied ticket is declined. None: no ticket says."""
         if self.tickets is None or result.call is None:
             return None
-        try:
-            from toolwall import context as _context
+        from toolwall import context as _context
+        from toolwall.approvals import TicketError
 
+        try:
             ticket = self.tickets.lookup(result.call.name, result.call.args, dict(_context.current()))
+        except TicketError:
+            return None  # this call can't be bound to a ticket, so none can exist for it
         except Exception as exc:
             return self._approval_failed(result, f"approval ticket check raised {type(exc).__name__}: fails closed")
         if ticket is None:

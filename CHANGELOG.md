@@ -21,6 +21,9 @@ it later, and exactly that call runs, once.
   declines it.
 - Claude Agent SDK: `hooks(wall, on_hold="defer")` ends the run on a held call;
   resume after approving the ticket. The LangChain interrupt carries the ticket.
+- An approval given through a framework settles the ticket (`take_slot` marks
+  it used; `wall.decline(decision)`, used by the LangChain adapter, denies it),
+  so the queue can't run the same call again.
 - `python -m toolwall approvals list|show|approve|deny --db FILE`: a CLI approver
   for a SQLite store.
 - `examples/approval_tickets.py` and `docs/approvals.md`.
@@ -32,6 +35,12 @@ it later, and exactly that call runs, once.
 - Expired, denied, used or edited tickets never run. An edited ticket is refused
   before anything is called.
 - The store is trusted: anyone who can write to it can approve a ticket.
+- OpenAI Agents SDK: a held call runs only when the SDK reports that a person
+  approved that exact call (`is_tool_approved`), not whenever the guardrail
+  sees "ask". An approved ticket used up by another worker between the SDK's
+  check and the guardrail can't run the call a second time.
+- A request context the ticket fingerprint can't hold (an object) means no
+  ticket for that call; an approval handler still decides as in 0.6.
 
 ### Known limits
 - Ticket arguments and context values must be plain JSON values. A call that

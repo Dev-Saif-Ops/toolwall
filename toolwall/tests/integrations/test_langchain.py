@@ -400,3 +400,15 @@ def test_a_ticket_approved_later_lets_the_next_run_through_without_pausing():
                           [issue_refund], mw).invoke({"messages": [("user", "refund")]}, config())
     assert "__interrupt__" not in again and ran == [("o_9", 300)]
     assert wall.approvals.get(ticket).status == "used"
+
+
+def test_declining_in_langgraph_denies_the_ticket():
+    ran = []
+    wall, issue_refund, mw = make(ran)
+    agent = agent_for(scripted("issue_refund", {"order_id": "o_9", "amount": 300}), [issue_refund], mw)
+    cfg = config()
+    with wall.context(customer_id="c_42"):
+        state = agent.invoke({"messages": [("user", "refund")]}, cfg)
+        ticket = state["__interrupt__"][0].value["ticket"]
+        agent.invoke(Command(resume=False), cfg)
+    assert wall.approvals.get(ticket).status == "denied" and ran == []

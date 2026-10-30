@@ -221,3 +221,41 @@ def test_a_ticket_approved_out_of_band_runs_without_another_pause():
                           tools=[tool]))
     assert not again.interruptions and ran == [("o_9", 300)]
     assert wall.approvals.get(ticket).status == "used"
+
+
+def test_a_ticket_used_up_between_the_check_and_the_guardrail_does_not_run():
+    # The SDK's needs_approval sees an approved ticket and doesn't pause; someone
+    # else uses it before the input guardrail runs. Nobody approved this call.
+    ran = []
+    wall, tool = make(ran)
+    with wall.context(customer_id="c_42"):
+        first = wall.decide("issue_refund", {"order_id": "o_9", "amount": 300})
+    wall.approvals.approve(first.ticket, by="ops")
+    real_decide = wall.decide
+
+    def decide_after_someone_else_used_it(name, args=None):
+        ticket = wall.approvals.store.get(first.ticket)
+        if ticket.status == "approved":
+            wall.approvals.redeem(ticket)
+        return real_decide(name, args)
+
+    wall.decide = decide_after_someone_else_used_it
+    with wall.context(customer_id="c_42"):
+        result = run(Agent(name="support", tools=[tool],
+                           model=ScriptedModel("issue_refund", {"order_id": "o_9", "amount": 300})))
+    assert ran == [] and not result.interruptions
+
+
+def test_approving_in_the_sdk_settles_the_ticket():
+    ran = []
+    wall, tool = make(ran)
+    agent = Agent(name="support", model=ScriptedModel("issue_refund", {"order_id": "o_9", "amount": 300}),
+                  tools=[tool])
+    with wall.context(customer_id="c_42"):
+        result = run(agent)
+        ticket = wall.approvals.pending()[0].id
+        state = result.to_state()
+        state.approve(result.interruptions[0])
+        asyncio.run(Runner.run(agent, state))
+    assert ran == [("o_9", 300)]
+    assert wall.approvals.pending() == [] and wall.approvals.get(ticket).status == "used"

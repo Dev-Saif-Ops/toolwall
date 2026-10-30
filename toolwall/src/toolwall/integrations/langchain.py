@@ -110,6 +110,7 @@ class ToolWallMiddleware(AgentMiddleware):
                 "reason": decision.reason, "ticket": decision.ticket,
             })
             if approved is not True:
+                self.wall.decline(decision)
                 return None, ToolMessage(content="A person declined this call.",
                                          tool_call_id=call_id, status="error")
             decision = self.wall.take_slot(decision)

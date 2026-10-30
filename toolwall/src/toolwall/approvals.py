@@ -167,6 +167,9 @@ class SQLiteStore:
 
     def add(self, ticket: Ticket) -> None:
         with self._lock:
+            # Keep the table bounded: drop tickets a day past their expiry.
+            self._db.execute("DELETE FROM toolwall_tickets WHERE expires_at < ?",
+                             (ticket.created_at - 86400,))
             self._db.execute(
                 "INSERT INTO toolwall_tickets VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ticket.id, ticket.tool, json.dumps(ticket.args, sort_keys=True),
@@ -287,6 +290,14 @@ class Approvals:
                         created_at=now, expires_at=now + self.ttl)
         self.store.add(ticket)
         return ticket
+
+    def close(self, ticket_id: str, to: Status, *, by: str | None = None) -> bool:
+        """Settle a pending or approved ticket that a framework's own approval
+        handled ("used" when a person approved there, "denied" when they
+        declined). False when it was already settled or has expired."""
+        if to not in ("used", "denied"):
+            raise ValueError('close() settles a ticket as "used" or "denied"')
+        return self.store.transition(ticket_id, ("pending", "approved"), to, time.time(), by=by)
 
     def redeem(self, ticket: Ticket) -> bool:
         """Use an approved ticket up. True once; False if it was already used,

@@ -40,7 +40,13 @@ def cmd_approvals(args: argparse.Namespace) -> int:
     if not Path(args.db).is_file():
         print(f"no approvals database at {args.db}", file=sys.stderr)
         return 2
-    store = SQLiteStore(args.db)
+    import sqlite3
+
+    try:
+        store = SQLiteStore(args.db)
+    except sqlite3.DatabaseError as exc:
+        print(f"{args.db} isn't an approvals database: {exc}", file=sys.stderr)
+        return 2
     approvals = Approvals(store)
     try:
         if args.action == "list":
