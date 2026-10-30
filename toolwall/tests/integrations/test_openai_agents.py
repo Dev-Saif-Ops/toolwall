@@ -276,3 +276,103 @@ def test_an_approved_call_to_a_namespaced_tool_runs():
         state.approve(result.interruptions[0])
         asyncio.run(Runner.run(agent, state))
     assert ran == [("o_9", 300)]
+
+
+class TurnModel(Model):
+    """One scripted response per turn, then a text answer."""
+
+    def __init__(self, turns):
+        self.turns, self.n = turns, 0
+
+    async def get_response(self, *a, **k):
+        out = self.turns[self.n] if self.n < len(self.turns) else [
+            ResponseOutputMessage(id="m", type="message", role="assistant", status="completed",
+                                  content=[ResponseOutputText(type="output_text", text="done",
+                                                              annotations=[])])]
+        self.n += 1
+        return ModelResponse(output=out, usage=Usage(), response_id=None)
+
+    def stream_response(self, *a, **k):  # pragma: no cover
+        raise NotImplementedError
+
+
+def refund_call(call_id, amount, namespace=None, name="issue_refund", args=None):
+    extra = {"namespace": namespace} if namespace else {}
+    return ResponseFunctionToolCall(type="function_call", call_id=call_id, id="fc_" + call_id, name=name,
+                                    arguments=json.dumps(args if args is not None else
+                                                         {"order_id": "o_9", "amount": amount}), **extra)
+
+
+def twin_tools():
+    """Two tools with the same name on one wall; B's approval check is raced:
+    right after it sees an approved ticket, another worker uses that ticket."""
+    from toolwall import ToolSchema
+
+    wall = ToolWall()
+    ran = []
+
+    def mk(tag):
+        @guard_tool(wall)
+        def issue_refund(order_id: str, amount: int | float) -> str:
+            ran.append((tag, amount))
+            return "ok"
+        return issue_refund
+
+    wall.rule("issue_refund", schema=ToolSchema(required=["order_id", "amount"],
+                                                types={"order_id": str, "amount": (int, float)}),
+              ask_if=r.over("amount", 200))
+    a, b = mk("A"), mk("B")
+    probe = b.needs_approval
+
+    async def raced(run_context, args, call_id):
+        answer = await probe(run_context, args, call_id)
+        ticket = wall.approvals.lookup("issue_refund", args, {})
+        if ticket is not None and ticket.status == "approved":
+            wall.approvals.redeem(ticket)
+        return answer
+
+    b.needs_approval = raced
+    return wall, a, b, ran
+
+
+def approve_always_then_queue_5000(wall, agent):
+    result = run(agent)
+    state = result.to_state()
+    for item in result.interruptions:
+        state.approve(item, always_approve=True)
+    held = wall.decide("issue_refund", {"order_id": "o_9", "amount": 5000})
+    wall.approvals.approve(held.ticket, by="ops")
+    return asyncio.run(Runner.run(agent, state))
+
+
+def test_always_approve_on_one_tool_does_not_cover_a_namesake_in_a_namespace():
+    from agents.tool import tool_namespace
+
+    wall, a, b, ran = twin_tools()
+    agent = Agent(name="support", tools=[a, *tool_namespace(name="billing", description="b", tools=[b])],
+                  model=TurnModel([[refund_call("c1", 300)], [refund_call("c2", 5000, "billing")]]))
+    approve_always_then_queue_5000(wall, agent)
+    assert ran == [("A", 300)]
+
+
+def test_always_approve_on_one_agent_does_not_cover_a_namesake_after_a_handoff():
+    wall, a, b, ran = twin_tools()
+    second = Agent(name="b", tools=[b], model=TurnModel([[refund_call("c2", 5000)]]))
+    first = Agent(name="a", tools=[a], handoffs=[second],
+                  model=TurnModel([[refund_call("c1", 300)],
+                                   [refund_call("h1", 0, name="transfer_to_b", args={})]]))
+    approve_always_then_queue_5000(wall, first)
+    assert ran == [("A", 300)]
+
+
+def test_the_approval_check_failing_counts_as_not_approved(monkeypatch):
+    import toolwall.integrations.openai_agents as oa
+
+    class Broken:
+        tool_name = "issue_refund"
+        tool_call_id = "c1"
+
+        def get_approval_status(self, *a, **k):
+            raise RuntimeError("sdk changed")
+
+    assert oa._approved_in_sdk(Broken()) is False

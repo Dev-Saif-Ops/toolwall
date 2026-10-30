@@ -75,6 +75,9 @@ Notes:
 - The SDK can't swap the arguments a tool receives, so a call whose arguments
   carry a secret is rejected, not redacted.
 - Already using `function_tool`? Pass `**guardrails(wall, "issue_refund")` to it.
+- The wall knows a tool by its function name (or `name_override`), not its
+  namespace or agent: tools with the same name share one set of rules and
+  approval tickets. Give them distinct names if they need different rules.
 
 ## Claude Agent SDK
 

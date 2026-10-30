@@ -36,9 +36,10 @@ it later, and exactly that call runs, once.
   before anything is called.
 - The store is trusted: anyone who can write to it can approve a ticket.
 - OpenAI Agents SDK: a held call runs only when the SDK reports that a person
-  approved that exact call, or chose "always approve" for the tool
-  (`is_tool_approved`, under the tool's qualified name for a `tool_namespace`),
-  not whenever the guardrail sees "ask". An approved ticket used up by another worker between the SDK's
+  approved that exact call, or chose "always approve" for that tool on that
+  agent (the SDK's approval status for this invocation, namespace and agent
+  included), not whenever the guardrail sees "ask". An "always approve" given to
+  another tool or agent with the same name doesn't count. An approved ticket used up by another worker between the SDK's
   check and the guardrail can't run the call a second time.
 - A request context the ticket fingerprint can't hold (an object) means no
   ticket for that call; an approval handler still decides as in 0.6.

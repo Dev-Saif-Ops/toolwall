@@ -62,19 +62,19 @@ def _reject(name: str) -> Any:
 
 
 def _approved_in_sdk(ctx: Any) -> bool:
-    """The SDK records that a person approved this call (by its call id). A tool
-    in a tool_namespace is filed under its qualified name."""
-    names = []
-    for name in (getattr(ctx, "qualified_tool_name", None), ctx.tool_name):
-        if isinstance(name, str) and name not in names:
-            names.append(name)
-    for name in names:
-        try:
-            if ctx.is_tool_approved(name, ctx.tool_call_id) is True:
-                return True
-        except Exception:
-            continue
-    return False
+    """The SDK says a person approved this invocation: this call id, of this tool
+    (in its namespace), on this agent. A name-only lookup could pick up an
+    "always approve" given to another tool or agent with the same name."""
+    try:
+        from agents.items import ToolApprovalItem
+
+        namespace = getattr(ctx, "tool_namespace", None)
+        item = ToolApprovalItem(agent=ctx.agent, raw_item=ctx.tool_call,
+                                tool_name=ctx.tool_name, tool_namespace=namespace)
+        return ctx.get_approval_status(ctx.tool_name, ctx.tool_call_id, tool_namespace=namespace,
+                                       current_invocation=item) is True
+    except Exception:
+        return False
 
 
 def guardrails(wall: "ToolWall", tool_name: str | None = None) -> dict[str, Any]:
