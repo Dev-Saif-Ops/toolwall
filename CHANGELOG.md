@@ -37,14 +37,14 @@ same rules; the framework keeps running the tool.
   asking the wall (safe, but noisy). Arguments carrying a secret are rejected,
   since the SDK can't swap them.
 - MCP has no standard approval flow, so a held call is refused with a reason
-  saying it needs approval.
+  saying it needs approval, unless the wall has an approval handler.
 - Claude Agent SDK: a failing tool's error text (an MCP tool error, Bash exiting
   non-zero) reaches the model unscanned, because the SDK's failure hook can't
   replace it. Wrap your own SDK MCP tools with `wall.protect`, which scrubs
   exception text. The hooks read the context when the client connects.
 - Approvals live in memory for one run. Tickets that survive a restart are 0.7.
 
-## [0.5.0] - unreleased
+## [0.5.0] - 2026-10-30
 
 ToolWall narrows its focus to agents that serve customers, where a tool can move
 money, change an account or contact someone: business rules on the arguments,
@@ -78,7 +78,7 @@ person. Everything from 0.4.x keeps working.
 
 ### Changed
 - README leads with the support-agent example.
-- 300 to 447 tests.
+- 300 to 498 tests.
 
 ### Security notes
 - A rule or lookup that returns an awaitable (or a generator or Future) fails
@@ -90,30 +90,42 @@ person. Everything from 0.4.x keeps working.
   hides in exactly those disagreements. So outside `'...'` and `"..."` (with
   doubled quotes) only plain ASCII identifiers, numbers, operators and spaces are
   allowed: comments, `$`, `#`, `@`, `:`, `\`, brackets, backticks, `\r`, NUL and
-  non-ASCII outside quotes are refused. SQL Server needs no `;` between statements,
-  so its statement verbs (`SHUTDOWN`, `KILL`, `BACKUP`, `DBCC`, `WAITFOR`, `BEGIN`...)
-  are refused anywhere. Ordinary reads fit; anything else is a false block, by
-  design (including Postgres `::` casts, MySQL backticks and `@vars`, and columns
-  named like a write keyword). It does not know
+  non-ASCII outside quotes are refused. Ordinary reads fit; anything else is a
+  false block, by design (including Postgres `::` casts, `:id` parameters, MySQL
+  backticks and `@vars`, and unquoted columns named like a keyword or starting
+  `xp_`/`sp_`; quote them to pass). It does not know
   which functions have side effects (`pg_sleep`, `nextval`, `lo_import`,
   `dblink_exec`...): pair it with a read-only database role.
+- SQL Server needs no `;` between statements, so `sql_readonly()` can't promise
+  one statement there. A named list of T-SQL verbs (`SHUTDOWN`, `KILL`, `BACKUP`,
+  `DBCC`, `WAITFOR`, `WHILE`, `BEGIN`, `SETUSER`, `WRITETEXT`, `ADD`..., and any
+  `xp_`/`sp_` name) is refused anywhere outside quotes. It is best effort: a verb
+  not on the list (`OPEN`, `CLOSE` and `IF` are left off as common names) passes.
+  On SQL Server the read-only role and a statement timeout are the real control.
 - `path_under()` matches its deny list case-insensitively (`.ENV` opens `.env` on
   macOS and Windows) and follows symlinks before checking the root.
 - A rule that reads the request context raises when its key is unset, so it blocks
-  even under `~`: no context, no permission, negated or not.
+  even under `~`: no context, no permission, negated or not. A context value of
+  `None` counts as unset.
 - Model-facing reasons name an argument only when its name is a plain identifier
   (letters, digits, underscore) of up to 40 characters; otherwise they say "an
   argument".
 
 ### Known limits
 - Rules and lookups are synchronous. An async lookup (an async database call)
-  fails the rule; async lookups arrive with the framework adapters in 0.6.
+  fails the rule.
 - `decide()` returns "ask" without taking a budget slot, and there is no API yet to
   run an approved "ask": approval tickets arrive in 0.7. Until then, call
   `decide()` again after the person approves, or keep approval inside
   `call()`/`acall()` with an approval handler.
 - `wall.rule()` replaces the tool's whole policy; put every rule for a tool in one
   call.
+- `a | b` stops at the first rule that allows, so a context rule placed second
+  is never asked. `one_of(...) | equals_context("k")` allows the listed values
+  with no context set; put the context rule first if it must always apply.
+- `~owned_by(...)` ("not this customer's record") is true when the lookup finds
+  no owner or an owner of another type. For "no self-approval" checks, make the
+  lookup raise on a miss.
 - Request context follows the thread or asyncio task. Work run in a thread pool
   sees no context (rules deny) unless it is carried over with `asyncio.to_thread`
   or `contextvars.copy_context().run`.
