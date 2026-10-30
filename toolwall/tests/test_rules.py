@@ -90,7 +90,9 @@ def test_owned_by_fails_closed_on_lookup_errors_and_async_lookups():
             r.owned_by("customer_id", lookup=boom)("o_9")  # Policy turns a raise into a block
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            assert not r.owned_by("customer_id", lookup=async_lookup)("o_9")
+            # Raises (the policy blocks it) rather than returning False, which ~ would invert.
+            with pytest.raises(TypeError):
+                r.owned_by("customer_id", lookup=async_lookup)("o_9")
 
 
 # --- data access -----------------------------------------------------------------
@@ -298,6 +300,54 @@ def test_sql_readonly_still_allows_quoted_keywords():
     assert r.sql_readonly()("SELECT 'delete; drop' AS note, \"update\" FROM t WHERE a = 'it''s'")
 
 
+@pytest.mark.parametrize("sql", [
+    # critic round 2: dialect forms the lexer can't agree on with every database
+    "WITH x AS (SELECT 1 AS [']) DELETE FROM orders --'])",
+    "WITH x AS (SELECT 1 AS a$q$) DELETE FROM orders -- $q$",
+    "SELECT 1 AS [']; DROP TABLE t; SELECT 1 AS [']",
+    "SELECT 1 AS x$a$ ; DROP TABLE t; SELECT 1 AS y$a$",
+    "SELECT 1 --x\r; DROP TABLE t",
+    "SELECT 1 /* /* */ ' */ ; DROP TABLE t; -- '",
+    "SELECT $a$ $$ ' $a$; DROP TABLE t; -- '",
+    'SELECT "\\"" ; DROP TABLE t; -- "',
+    "SELECT 1 # '\n; DROP TABLE t; -- '",
+    "SELECT * FROM users /*! INTO OUTFILE '/tmp/x' */",
+    "SELECT 1--1; DROP TABLE t",
+    "SELECT `a` FROM t",
+    "SELECT $1",
+    "SELECT 1\r",
+    "SELECT 1 \uff1b DROP TABLE t",
+    "LOAD DATA INFILE 'x' INTO TABLE t",
+    "SELECT 1 FROM t -- trailing comment",
+])
+def test_sql_readonly_refuses_dialect_ambiguous_forms(sql):
+    assert not r.sql_readonly()(sql)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT id, name FROM customers WHERE id = 42",
+    "SELECT * FROM orders WHERE note = 'it''s here' AND \"from\" = 'x'",
+    "WITH recent AS (SELECT * FROM orders WHERE created > '2026-01-01') SELECT count(*) FROM recent",
+    "select a.id from a join b on a.id = b.a_id where b.x in (1, 2, 3) order by a.id limit 10;",
+    "SELECT 'café' AS name",
+])
+def test_sql_readonly_allows_ordinary_portable_reads(sql):
+    assert r.sql_readonly()(sql)
+
+
+def test_sql_readonly_blocks_a_real_single_statement_delete_in_sqlite():
+    import sqlite3
+
+    con = sqlite3.connect(":memory:")
+    con.execute("create table orders (id)")
+    con.executemany("insert into orders values (?)", [(1,), (2,)])
+    for sql in ("WITH x AS (SELECT 1 AS [']) DELETE FROM orders --'])",
+                "WITH x AS (SELECT 1 AS a$q$) DELETE FROM orders -- $q$"):
+        if r.sql_readonly()(sql):
+            con.execute(sql)
+    assert con.execute("select count(*) from orders").fetchone()[0] == 2
+
+
 def test_sql_readonly_stacked_queries_really_are_blocked_in_sqlite():
     import sqlite3
 
@@ -335,3 +385,34 @@ def test_owned_by_is_type_strict():
         assert not r.owned_by("customer_id", lookup=lambda _: True)("o")
         assert not r.owned_by("customer_id", lookup=lambda _: 1.0)("o")
         assert r.owned_by("customer_id", lookup=lambda _: 1)("o")
+
+
+
+def test_negated_owned_by_with_an_async_lookup_fails_closed():
+    async def owner_of(_):
+        return "c_42"
+
+    wall = ToolWall()
+    wall.register("rate_listing", lambda listing_id: "rated",
+                  schema=__import__("toolwall").ToolSchema(required=["listing_id"]))
+    wall.rule("rate_listing", listing_id=~r.owned_by("customer_id", lookup=owner_of))
+    with wall.context(customer_id="c_42"):
+        res = _quiet(lambda: wall.call("rate_listing", {"listing_id": "l_1"}))
+    assert res.blocked and not res.executed
+
+
+def test_rule_returning_a_lazy_value_fails_closed():
+    import concurrent.futures
+
+    def gen_rule(v):
+        yield True
+
+    fut = concurrent.futures.Future()
+    for fn in (gen_rule, lambda v: fut):
+        with pytest.raises(TypeError):
+            r.Rule(fn, "lazy")("x")
+
+
+def test_decimal_infinity_is_not_a_number():
+    assert not r.positive()(Decimal("Infinity"))
+    assert not r.at_least(0)(Decimal("Infinity"))

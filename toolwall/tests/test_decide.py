@@ -225,8 +225,23 @@ def test_safe_argument_names_are_still_named():
 def test_toolwall_context_module_is_importable():
     import importlib
 
+    import sys
+
+    import toolwall
+
     module = importlib.import_module("toolwall.context")
+    assert toolwall.context is sys.modules["toolwall.context"]  # not shadowed by the class
     assert hasattr(module, "current") and hasattr(module, "context")
     from toolwall.context import context
     with context(customer_id="c"):
         assert module.current()["customer_id"] == "c"
+
+
+
+def test_argument_names_are_echoed_only_up_to_the_limit():
+    ok, too_long = "a" * 40, "a" * 41
+    for name, echoed in ((ok, True), (too_long, False)):
+        wall = ToolWall()
+        wall.rule("t", schema=ToolSchema(), **{name: r.one_of("ok")})
+        reason = wall.decide("t", {name: "bad"}).reason
+        assert (f"'{name}'" in reason) is echoed

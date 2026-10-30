@@ -34,21 +34,26 @@ person. Everything from 0.4.x keeps working.
 
 ### Changed
 - README leads with the support-agent example.
-- 300 to 393 tests.
+- 300 to 420 tests.
 
 ### Security notes
-- A rule or lookup that returns an awaitable fails closed, including inside a
-  composed rule (`a & b`, `a | b`, `~a`).
-- `sql_readonly()` reads the statement in one pass that recognises comments,
-  `'...'`, `"..."`, backtick and `$tag$...$tag$` quoting together, so a quote or
-  comment marker can't hide a second statement. Unterminated quoting and backslash
-  escapes are refused. It does not know which functions have side effects
-  (`pg_sleep`, `nextval`, `lo_import`, `dblink_exec`...): pair it with a read-only
-  database role.
+- A rule or lookup that returns an awaitable (or a generator or Future) fails
+  closed, including inside a composed rule (`a & b`, `a | b`, `~a`) and under
+  `~owned_by(...)`: the rule raises, and the policy turns that into a block.
+- `sql_readonly()` accepts a portable subset of SQL and refuses everything else.
+  Databases disagree about comments, about quoting (`[x]`, `` `x` ``, `$tag$`,
+  backslash escapes) and about where a statement ends, and a second statement
+  hides in exactly those disagreements. So outside `'...'` and `"..."` (with
+  doubled quotes) only plain ASCII identifiers, numbers, operators and spaces are
+  allowed: comments, `$`, `#`, `\`, brackets, backticks, `\r` and NUL are refused.
+  Ordinary reads fit; anything else is a false block, by design. It does not know
+  which functions have side effects (`pg_sleep`, `nextval`, `lo_import`,
+  `dblink_exec`...): pair it with a read-only database role.
 - `path_under()` matches its deny list case-insensitively (`.ENV` opens `.env` on
   macOS and Windows) and follows symlinks before checking the root.
-- Model-facing reasons name an argument only when its name is a plain identifier of
-  up to 64 characters; otherwise they say "an argument".
+- Model-facing reasons name an argument only when its name is a plain identifier
+  (letters, digits, underscore) of up to 40 characters; otherwise they say "an
+  argument".
 
 ### Known limits
 - Rules and lookups are synchronous. An async lookup (an async database call)

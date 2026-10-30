@@ -37,7 +37,7 @@ DefaultMode = Literal["deny", "allow"]
 ApprovalHandler = Callable[["GateResult"], bool]
 
 
-_SAFE_ARG = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]{0,63}")
+_SAFE_ARG = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,39}")
 
 
 class Verdict(str, Enum):

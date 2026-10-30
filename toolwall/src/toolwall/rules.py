@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import decimal
 import fnmatch
+from concurrent.futures import Future as _Future
 import inspect
 import math
 import os
@@ -62,6 +63,9 @@ class Rule:
             # so raise: the policy turns a raising rule into a block (fail closed).
             discard_awaitable(verdict)
             raise TypeError(f"rule {self.__name__} returned an awaitable; rules must be synchronous")
+        if inspect.isgenerator(verdict) or inspect.isasyncgen(verdict) or isinstance(verdict, _Future):
+            # Also truthy, also not an answer.
+            raise TypeError(f"rule {self.__name__} returned a lazy value, not a verdict")
         return bool(verdict)
 
     def __and__(self, other: Callable[[Any], bool]) -> "Rule":
@@ -177,8 +181,10 @@ def owned_by(key: str, *, lookup: Callable[[Any], Any]) -> Rule:
             return False
         owner = lookup(value)
         if inspect.isawaitable(owner):
+            # Raise rather than return False: ~owned_by(...) would turn False into
+            # a pass. The policy blocks a raising rule.
             discard_awaitable(owner)
-            return False
+            raise TypeError("owned_by lookup returned an awaitable; lookups must be synchronous")
         # Type-strict like equals_context: True is not 1, and 1.0 is not 1.
         return owner is not None and type(owner) is type(expected) and owner == expected
 
@@ -190,54 +196,54 @@ _UNSET = object()
 
 # -- data access --------------------------------------------------------------------
 
-# One left-to-right pass: every quoted or commented region is recognised together,
-# so a quote inside a comment or a comment marker inside a string can't hide text.
-_SQL_TOKEN = re.compile(
-    r"""
-      (?P<line>--[^\n]*)
-    | (?P<block>/\*.*?\*/)
-    | (?P<squote>'(?:[^'\\]|'')*')
-    | (?P<dquote>"(?:[^"]|"")*")
-    | (?P<bquote>`[^`]*`)
-    | (?P<dollar>\$(?P<tag>[A-Za-z_]\w*)?\$.*?\$(?P=tag)?\$)
-    | (?P<open>/\*|['"`]|\$(?:[A-Za-z_]\w*)?\$|\\)
-    """,
-    re.S | re.X,
-)
+# sql_readonly accepts a portable subset of SQL and refuses everything else.
+# Databases disagree about comments (# in MySQL, nested /* */ and \r in
+# Postgres), about quoting ([x] in sqlite and SQL Server, `x` in MySQL, $tag$ in
+# Postgres, backslash escapes in MySQL strings) and about where a statement ends.
+# A rule that tries to parse every dialect gets one of them wrong, and a
+# disagreement is exactly where a second statement hides. So: outside the two
+# quoting forms every database agrees on ('...' and "..." with doubling), only
+# plain ASCII identifiers, numbers, operators and spaces are allowed.
+_SQL_QUOTED = re.compile(r"'(?:[^'\\\x00\r]|'')*'|\"(?:[^\"\\\x00\r]|\"\")*\"")
+_SQL_ALLOWED_OUTSIDE = re.compile(r"[A-Za-z0-9_ \t\n(),.*=<>!+\-/%:;|&^~?@]*")
 _SQL_WRITE = re.compile(
     r"\b(insert|update|delete|merge|upsert|replace|drop|alter|create|truncate|rename|grant|"
     r"revoke|attach|detach|copy|call|exec|execute|do|vacuum|reindex|pragma|set|lock|into|"
-    r"load|handler|import)\b",
+    r"load|handler|import|outfile|dumpfile)\b",
     re.I,
 )
 
 
 def _sql_code(text: str) -> str | None:
-    """The statement with every string, identifier and comment blanked out, or
-    None when something is unterminated or uses a quoting form we don't model
-    (a backslash escape, an unmatched quote or dollar tag): refuse, don't guess."""
-    out: list[str] = []
-    pos = 0
-    for m in _SQL_TOKEN.finditer(text):
-        out.append(text[pos:m.start()])
-        if m.lastgroup == "open" or (m.lastgroup == "squote" and "\\" in m.group()):
-            return None
-        out.append(" " if m.lastgroup in ("line", "block") else " _ ")
-        pos = m.end()
-    out.append(text[pos:])
-    return "".join(out)
+    """The statement with its quoted parts blanked, or None when anything falls
+    outside the portable subset (comments, other quoting, backslashes, $, #,
+    brackets, backticks, \r, NUL, non-ASCII outside quotes, an unterminated quote)."""
+    code = _SQL_QUOTED.sub(" _ ", text)
+    if not _SQL_ALLOWED_OUTSIDE.fullmatch(code):
+        return None
+    if "--" in code or "/*" in code or "*/" in code:
+        return None
+    return code
 
 
 def sql_readonly() -> Rule:
-    """One read-only statement: starts with SELECT or WITH, no second statement,
-    and no write keyword outside strings, quoted names and comments (including
-    CTEs like WITH x AS (DELETE ...)).
+    """One read-only statement in a portable subset of SQL.
 
-    Conservative on purpose. Unterminated quotes or comments, backslash escapes
-    and anything it can't tokenise are refused. It does not know which functions
-    have side effects: pg_sleep, nextval, setval, set_config, lo_import,
-    pg_read_file, dblink_exec and pg_terminate_backend all pass. Pair it with a
-    read-only database role; this rule is a second line, not the only one.
+    Allowed: a single statement starting with SELECT or WITH (one trailing ;),
+    '...' strings and "..." identifiers with doubled quotes, plain ASCII
+    identifiers, numbers and operators, and no write keyword outside quotes
+    (including CTEs like WITH x AS (DELETE ...)).
+
+    Refused, because databases disagree about them and a disagreement is where a
+    second statement hides: comments of any kind, backslashes, $ (dollar quoting
+    and $1 placeholders), #, [brackets], `backticks`, \r, NUL, and non-ASCII
+    outside quotes. Ordinary LLM-written reads fit the subset; anything else is a
+    false block, by design.
+
+    It does not know which functions have side effects: pg_sleep, nextval, setval,
+    set_config, lo_import, pg_read_file, dblink_exec and pg_terminate_backend all
+    pass. Pair it with a read-only database role; this rule is a second line, not
+    the only one.
     """
 
     def check(value: Any) -> bool:
