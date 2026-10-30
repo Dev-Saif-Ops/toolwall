@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("langchain.agents.middleware")
 
 from langchain.agents import create_agent  # noqa: E402
-from langchain.messages import AIMessage, ToolMessage  # noqa: E402
+from langchain.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 from langchain.tools import tool  # noqa: E402
 from langchain_core.tools import InjectedToolCallId  # noqa: E402
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel  # noqa: E402
@@ -266,3 +266,53 @@ def test_a_secret_in_another_state_key_withholds_the_command():
     request = type("R", (), {"tool_call": {"name": "lookup", "id": "c1", "args": {}}})()
     out = mw._after(request, lookup.func("c_42", "c1"))
     assert isinstance(out, ToolMessage) and out.status == "error"
+
+
+def _after(wall, tool_result, name="t"):
+    mw = ToolWallMiddleware(wall)
+    request = type("R", (), {"tool_call": {"name": name, "id": "call_1", "args": {}}})()
+    return mw._after(request, tool_result)
+
+
+REAL_HISTORY = [
+    AIMessage(content="", id="chatcmpl-AqZk3PqL9vT2mN8rB4wY6zA1cE7fG",
+              response_metadata={"id": "msg_01Xk3PqL9vT2mN8rB4wY6zA1", "model_name": "gpt-5"},
+              tool_calls=[{"name": "transfer", "args": {"to": "bob"},
+                           "id": "call_Xk3PqL9vT2mN8rB4wY6zA1cE"}]),
+    AIMessage(content="ok", id="toolu_01Q8vT2mN8rB4wY6zA1cE7fGh"),
+]
+
+
+def test_a_handoff_with_real_provider_ids_passes():
+    from langgraph.types import Send
+
+    cmd = Command(goto=[Send("bob", {"messages": REAL_HISTORY})],
+                  update={"messages": REAL_HISTORY + [
+                      ToolMessage(content="handed off", tool_call_id="call_Xk3PqL9vT2mN8rB4wY6zA1cE")]})
+    out = _after(ToolWall(), cmd)
+    assert isinstance(out, Command)
+
+
+def test_a_secret_in_a_send_payload_withholds_the_command():
+    from langgraph.types import Send
+
+    cmd = Command(update={"messages": [ToolMessage(content="ok", tool_call_id="call_1")]},
+                  goto=[Send("model", {"messages": [HumanMessage(content=f"key {AWS_KEY}")]})])
+    out = _after(ToolWall(), cmd)
+    assert isinstance(out, ToolMessage) and out.status == "error"
+
+
+def test_a_known_secret_pattern_in_an_id_is_still_caught():
+    cmd = Command(update={"messages": [
+        ToolMessage(content="ok", tool_call_id="call_1"),
+        AIMessage(content="", tool_calls=[{"name": "x", "args": {}, "id": AWS_KEY}])]})
+    assert isinstance(_after(ToolWall(), cmd), ToolMessage)
+
+
+def test_a_message_that_cannot_be_scanned_withholds_the_command():
+    class Broken:
+        def model_dump(self):
+            raise RuntimeError("no")
+
+    cmd = Command(update={"messages": [ToolMessage(content="ok", tool_call_id="call_1"), Broken()]})
+    assert isinstance(_after(ToolWall(), cmd), ToolMessage)

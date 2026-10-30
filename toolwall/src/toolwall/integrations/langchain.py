@@ -32,6 +32,31 @@ from langchain.agents.middleware import AgentMiddleware
 if TYPE_CHECKING:  # pragma: no cover
     from toolwall.wall import ToolWall
 
+# Framework- and provider-generated identifiers: high-entropy by nature, so the
+# entropy check would read every one as a secret. They are scanned for known
+# secret patterns only.
+_ID_KEYS = frozenset({"id", "tool_call_id", "response_metadata", "usage_metadata"})
+
+
+def _split_ids(value: Any, ids: list[Any], depth: int = 0) -> Any:
+    """A plain copy of a message (or anything holding messages) with its id
+    fields moved into `ids`."""
+    if depth > 50:
+        raise ValueError("too deeply nested to scan")
+    if hasattr(value, "model_dump") and callable(value.model_dump):
+        value = value.model_dump()
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if k in _ID_KEYS:
+                ids.append(v)
+            else:
+                out[k] = _split_ids(v, ids, depth + 1)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_split_ids(v, ids, depth + 1) for v in value]
+    return value
+
 
 class ToolWallMiddleware(AgentMiddleware):
     """Agent middleware that puts every tool call through a ToolWall."""
@@ -88,6 +113,10 @@ class ToolWallMiddleware(AgentMiddleware):
         those. Any other update shape is withheld rather than passed unscanned."""
         from langchain.messages import ToolMessage
 
+        goto = command.goto if isinstance(command.goto, (list, tuple)) else [command.goto]
+        sends = [g.arg for g in goto if hasattr(g, "arg") and hasattr(g, "node")]
+        if sends and not self._clean(request, sends):
+            return self._withheld_command(request, command)
         update = command.update
         if update is None:
             return command
@@ -112,15 +141,34 @@ class ToolWallMiddleware(AgentMiddleware):
                 continue
             # Every field the provider may send (content, tool_calls,
             # invalid_tool_calls...), not just the text.
-            try:
-                fields = m.model_dump() if hasattr(m, "model_dump") else m
-            except Exception:
-                return self._withheld_command(request, command)
-            checked = self.wall.check_output(request.tool_call.get("name"), fields)
-            if checked.withheld or checked.value is not fields:
+            if not self._clean(request, m):
                 return self._withheld_command(request, command)
             cleaned.append(m)
         return dataclasses.replace(command, update={**others, "messages": cleaned})
+
+    def _clean(self, request: Any, value: Any) -> bool:
+        """True when no secret is found in value: every field fully, ids for
+        known secret patterns only. Anything that can't be scanned is not clean."""
+        from toolwall.shield import Shield
+
+        ids: list[Any] = []
+        try:
+            fields = _split_ids(value, ids)
+        except Exception:
+            return False
+        checked = self.wall.check_output(request.tool_call.get("name"), fields)
+        if checked.withheld or checked.value is not fields:
+            return False
+        shield = self.wall.gate.shield
+        if shield is None or not ids:
+            return True
+        patterns_only = Shield(mode="redact", patterns=shield.patterns, entropy=False,
+                               allowlist=shield.allowlist)
+        try:
+            _, findings = patterns_only.redact_args({"ids": ids})
+        except Exception:
+            return False
+        return not findings
 
     def _withheld_command(self, request: Any, command: Any) -> Any:
         from langchain.messages import ToolMessage

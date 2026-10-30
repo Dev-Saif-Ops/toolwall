@@ -132,11 +132,17 @@ with wall.context(customer_id="c_42"):
 ```
 
 A denied call becomes a `ToolMessage` with `status="error"`. A held call raises a
-LangGraph interrupt, which needs a checkpointer. Only `True` approves. With
-several held calls pending, resume each by id:
-`Command(resume={i.id: True for i in state["__interrupt__"]})`. Without one, pass
-`ToolWallMiddleware(wall, approvals=False)` and held calls are refused. Both
-`invoke` and `ainvoke` go through the wall.
+LangGraph interrupt, which needs a checkpointer; without a checkpointer, pass
+`ToolWallMiddleware(wall, approvals=False)` and held calls are refused. Only
+`True` approves. With several held calls pending, resume each by id:
+`Command(resume={i.id: True for i in state["__interrupt__"]})`. Both `invoke`
+and `ainvoke` go through the wall.
+
+A tool that returns a `Command` (a handoff, for example) has everything in it
+scanned: the messages, other state keys and any `Send` payloads. Ids are checked
+for known secret patterns only. If a secret is found anywhere, the whole
+Command is withheld and the model gets an error message instead, so a handoff
+that carries a history containing a secret does not happen.
 
 ## MCP servers (official Python SDK, 1.x and 2.x)
 

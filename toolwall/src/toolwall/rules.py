@@ -268,7 +268,8 @@ def sql_readonly() -> Rule:
     promised there. A named list of T-SQL verbs (SHUTDOWN, KILL, BACKUP, DBCC,
     WAITFOR, WHILE, BEGIN, SETUSER, WRITETEXT, ADD... and any xp_ or sp_ name) is
     refused anywhere outside quotes; it is best effort, and a verb not on it
-    (OPEN, CLOSE and IF are left off as common names) still passes. On SQL Server
+    (OPEN, CLOSE and IF are left off as common names; FETCH too, for pagination,
+    so reading an already-declared cursor passes) still passes. On SQL Server
     the read-only role and a statement timeout are the real control.
 
     Ordinary LLM-written reads fit the subset; anything else is a false block, by
