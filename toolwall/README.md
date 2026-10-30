@@ -29,7 +29,24 @@ pip install toolwall
 ```
 
 Zero required dependencies. Works with OpenAI, Anthropic, and Gemini native tool
-calling (and plain dicts). Python 3.10+.
+calling (and plain dicts). Python 3.10+, sync and async tools.
+
+**See it in 30 seconds, no API key:**
+
+```bash
+python -m toolwall demo
+```
+
+```text
+  ALLOW  issue_refund(order_id='o_9', amount=40.0)
+  BLOCK  issue_refund(order_id='o_9', amount=5000.0)       over the 500 cap
+  BLOCK  issue_refund(order_id='o_77', amount=40.0)        order belongs to another customer
+  BLOCK  send_email(to='x@evil.com,ops@ourco.com', ...)    not an allowed recipient
+  ALLOW  lookup_customer(customer_id='c_42')               output withheld: it held an API key
+  HELD   close_account(customer_id='c_42')                 waiting for a human
+  BLOCK  drop_all_tables()                                 a tool nobody registered
+```
+
 
 ## Quickstart
 
@@ -54,6 +71,22 @@ results = wall.guard(openai_response)   # or gate a raw OpenAI/Anthropic/Gemini 
 ```
 
 Only an `ALLOW` verdict runs the tool. `Gate` is the lower-level primitive underneath.
+
+**Async tools.** Agent frameworks are mostly async. Use `acall` and `aguard`: they
+await the tool, then scan what it returned, with every check `call` makes.
+
+```python
+async def lookup_customer(customer_id: str) -> dict: ...
+
+wall.register("lookup_customer", lookup_customer)   # schema from the annotations
+r = await wall.acall("lookup_customer", {"customer_id": "c_42"})
+results = await wall.aguard(openai_response)
+```
+
+The sync `call` refuses an async tool instead of reporting a coroutine as a run.
+A function whose parameters and return value are all annotated gets its schema
+from its signature; anything less still needs `schema=`.
+
 
 ## What it stops
 

@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.4.3] - unreleased
+
+Fixes from an adoption audit that walked the path a new user takes into a real,
+async agent framework. Every fix has a test that fails on 0.4.2.
+
+### Security
+- **Async tools skipped the output scan.** `call()` on an `async def` tool returned
+  `ALLOW`, `executed=True` and an un-awaited coroutine: the tool never ran, the
+  audit said it did, and when the caller awaited the coroutine the shield never
+  saw the result. The sync path now refuses an async tool before spending budget,
+  and withholds any awaitable a sync callable returns. Awaitables nested in an
+  output are withheld as unscannable.
+- **An async approval handler approved everything on the sync path,** because its
+  coroutine is truthy. It is now refused there, closed, and awaited on the async
+  path.
+- **An async policy rule or cross-rule passed every value** for the same reason. It
+  now fails closed with a clear reason.
+
+### Added
+- `ToolWall.acall()` / `aguard()`, `Gate.aexecute()` / `arun()` / `arun_all()` and
+  `MCPGuard.ahandle()`: await the tool, the forward and the approval handler, then
+  apply every check the sync path applies, sharing one admission path.
+- `python -m toolwall demo`: a support agent's seven tool calls gated, with no model
+  or API key.
+- `ToolWall.register()` infers the schema when every parameter and the return value
+  are annotated (no `**kwargs`). A lambda or a partly annotated function is still
+  denied by default until it has a schema; `infer_schema=False` opts out. `Gate` is
+  unchanged. String annotations (`from __future__ import annotations`) are now
+  resolved, so their types are enforced.
+- CI on GitHub Actions for Python 3.10 to 3.13: tests with `RuntimeWarning` as an
+  error, coverage, the attack suite, the demo, and a clean-install package check.
+- `py.typed`.
+
+### Changed
+- PyPI metadata: Python version classifiers, project URLs (site, source, changelog,
+  issues, security policy), and the keywords `agent-sandbox` and `mcp-proxy`
+  removed, since toolwall is neither.
+- 245 to 276 tests.
+
 ## [0.4.2] - 2026-10-05
 
 Findings from a three-lens red-team (bypass hunting, claims and mutation

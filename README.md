@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/toolwall.svg?cacheSeconds=300)](https://pypi.org/project/toolwall/)
 [![Python versions](https://img.shields.io/pypi/pyversions/toolwall.svg)](https://pypi.org/project/toolwall/)
 [![License: MIT](https://img.shields.io/pypi/l/toolwall.svg)](toolwall/LICENSE)
-[![Tests](https://img.shields.io/badge/tests-245%20passing-brightgreen.svg)](toolwall/tests)
+[![CI](https://github.com/Dev-Saif-Ops/toolwall/actions/workflows/ci.yml/badge.svg)](https://github.com/Dev-Saif-Ops/toolwall/actions/workflows/ci.yml)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](toolwall/pyproject.toml)
 [![Failure suite](https://img.shields.io/badge/attack%20suite-35%2F35%20blocked-brightgreen.svg)](gate-suite/results/REPORT.md)
 
@@ -11,7 +11,7 @@
 >
 > Your LLM can generate a **valid** tool call. That doesn't mean it's **safe** to execute.
 
-**Status: v0.4.2 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 245 tests · published attack suite.**
+**Status: v0.4.3 (alpha) · [on PyPI](https://pypi.org/project/toolwall/) · 276 tests in CI on Python 3.10–3.13 · published attack suite.**
 
 ```bash
 pip install toolwall
@@ -32,6 +32,22 @@ result = wall.call("delete_user", {"user_id": "123"})
 ```
 
 The tool never ran. Every decision is in the audit log.
+
+**See it in 30 seconds, no API key:**
+
+```bash
+python -m toolwall demo
+```
+
+```text
+  ALLOW  issue_refund(order_id='o_9', amount=40.0)
+  BLOCK  issue_refund(order_id='o_9', amount=5000.0)       over the 500 cap
+  BLOCK  issue_refund(order_id='o_77', amount=40.0)        order belongs to another customer
+  BLOCK  send_email(to='x@evil.com,ops@ourco.com', ...)    not an allowed recipient
+  ALLOW  lookup_customer(customer_id='c_42')               output withheld: it held an API key
+  HELD   close_account(customer_id='c_42')                 waiting for a human
+  BLOCK  drop_all_tables()                                 a tool nobody registered
+```
 
 ---
 
@@ -177,6 +193,22 @@ results = wall.guard(openai_response)   # OpenAI / Anthropic / Gemini shapes
 Only an `ALLOW` verdict executes the tool. `Gate` is the lower-level primitive
 underneath if you want to compose it yourself.
 
+**Async tools.** Agent frameworks are mostly async. Use `acall` and `aguard`: they
+await the tool, then scan what it returned, with every check `call` makes.
+
+```python
+async def lookup_customer(customer_id: str) -> dict: ...
+
+wall.register("lookup_customer", lookup_customer)   # schema from the annotations
+r = await wall.acall("lookup_customer", {"customer_id": "c_42"})
+results = await wall.aguard(openai_response)
+```
+
+The sync `call` refuses an async tool instead of reporting a coroutine as a run.
+A function whose parameters and return value are all annotated gets its schema
+from its signature; anything less still needs `schema=`.
+
+
 Two policy details worth knowing: `matches()` is a full match (anchor nothing, the
 whole value must match), and `ends_with("@ourco.com")` is a string rule that a
 comma-separated recipient list passes. For recipients use `email_domain("ourco.com")`,
@@ -192,6 +224,9 @@ def ask_human(result):
 
 wall = ToolWall(approval=ask_human)          # or wall.approve_with(ask_human)
 ```
+
+An `async def` handler works with `acall` / `aguard`, where it is awaited. The sync
+`call` refuses it rather than read its coroutine as a yes.
 
 The handler cannot change what runs: the gate records each result it issues (tool
 and argument receipt), and runs a result only once, only for the tool that was
@@ -250,7 +285,7 @@ Run the tests and the published attack suite yourself:
 
 ```bash
 cd toolwall && pip install -e ".[dev]"
-pytest                                    # 245 tests
+pytest                                    # 276 tests
 python ../gate-suite/run_suite.py         # 35/35 attacks blocked, prints the G1 report
 ```
 
