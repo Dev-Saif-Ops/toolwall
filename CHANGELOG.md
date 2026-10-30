@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `refund-desk/`: a reference support agent (OpenAI Agents SDK, SQLite) and six
+  attacks run with and without ToolWall, plus honest requests that must keep
+  working. `python refund-desk/run.py --check` runs in CI.
+
 ## [0.7.0] - 2026-10-30
 
 Approvals that bind the exact call: a held call gets a ticket, a person approves

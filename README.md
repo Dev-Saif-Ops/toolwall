@@ -355,6 +355,19 @@ ticket never runs. Inside a framework, the same call coming back after approval
 runs once without pausing again (Claude Agent SDK: `hooks(wall, on_hold="defer")`).
 Full guide: [docs/approvals.md](docs/approvals.md).
 
+## Refund Desk: six attacks on a support agent
+
+[refund-desk/](refund-desk/) is a small support agent on the OpenAI Agents SDK
+with a SQLite shop behind it. One command runs six attacks (a prompt-injected
+ticket, another customer's order, a refund bigger than the order, recipient
+smuggling, a key in a lookup result, a replayed approval) with and without
+ToolWall, and checks that honest requests still work:
+
+```bash
+pip install -r refund-desk/requirements.txt
+python refund-desk/run.py          # no API key: a scripted model
+```
+
 ## Examples
 
 Runnable from a clone of this repo (`cd toolwall`):
