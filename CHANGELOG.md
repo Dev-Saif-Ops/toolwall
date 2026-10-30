@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.5.0] - unreleased
+## [0.5.0] - 2026-10-30
 
 ToolWall narrows its focus to agents that serve customers, where a tool can move
 money, change an account or contact someone: business rules on the arguments,
@@ -34,7 +34,7 @@ person. Everything from 0.4.x keeps working.
 
 ### Changed
 - README leads with the support-agent example.
-- 300 to 447 tests.
+- 300 to 498 tests.
 
 ### Security notes
 - A rule or lookup that returns an awaitable (or a generator or Future) fails
