@@ -120,20 +120,28 @@ def not_empty(value: Any) -> bool:
 
 @dataclass
 class Policy:
-    """Per-tool policy: arg constraints, an optional cross-arg rule, approval flag.
+    """Per-tool policy: arg constraints, an optional cross-arg rule, approval.
 
     constraints: {arg_name: rule}. Absent args are skipped (schema owns presence).
     cross: receives the full args dict; returns an error string, a list of error
            strings, or None. Raising fails closed.
     require_approval: passing calls become NEEDS_APPROVAL instead of ALLOW.
+    ask_if: receives the full args dict; True makes a passing call NEEDS_APPROVAL
+           (for example "refunds over 200 need a human"). Raising or returning an
+           awaitable fails closed.
     """
 
     constraints: dict[str, Rule] = field(default_factory=dict)
     cross: CrossRule | None = None
     require_approval: bool = False
+    ask_if: Callable[[dict[str, Any]], bool] | None = None
 
     def validate(self, args: dict[str, Any]) -> list[str]:
-        errors: list[str] = []
+        return [message for _, message in self.violations(args)]
+
+    def violations(self, args: dict[str, Any]) -> list[tuple[str | None, str]]:
+        """(argument name or None for a cross-rule, message) for each failure."""
+        errors: list[tuple[str | None, str]] = []
         for key, rule in self.constraints.items():
             if key not in args:
                 continue
@@ -143,33 +151,48 @@ class Policy:
                 if inspect.isawaitable(verdict):
                     # A coroutine is truthy: reading it would pass every value.
                     discard_awaitable(verdict)
-                    errors.append(f"policy rule {name} for arg {key!r} is async; rules must be synchronous: fails closed")
+                    errors.append((key, f"policy rule {name} for arg {key!r} is async; rules must be synchronous: fails closed"))
                     continue
                 ok = bool(verdict)
             except Exception as exc:
-                errors.append(
+                errors.append((key,
                     f"policy rule {name} for arg {key!r} raised {type(exc).__name__}: fails closed"
-                )
+                ))
                 continue
             if not ok:
-                errors.append(f"policy violation: arg {key!r} rejected by {name}")
+                errors.append((key, f"policy violation: arg {key!r} rejected by {name}"))
         if self.cross is not None:
             try:
                 verdict = self.cross(dict(args))
             except Exception as exc:
-                errors.append(f"policy cross-rule raised {type(exc).__name__}: fails closed")
+                errors.append((None, f"policy cross-rule raised {type(exc).__name__}: fails closed"))
             else:
                 if inspect.isawaitable(verdict):
                     discard_awaitable(verdict)
-                    errors.append("policy cross-rule is async; rules must be synchronous: fails closed")
+                    errors.append((None, "policy cross-rule is async; rules must be synchronous: fails closed"))
                     return errors
                 if isinstance(verdict, str):
-                    errors.append(verdict)
+                    errors.append((None, verdict))
                 elif verdict:
                     for item in verdict:
                         if inspect.isawaitable(item):
                             discard_awaitable(item)
-                            errors.append("policy cross-rule returned an awaitable: fails closed")
+                            errors.append((None, "policy cross-rule returned an awaitable: fails closed"))
                         else:
-                            errors.append(item)
+                            errors.append((None, item))
         return errors
+
+    def wants_approval(self, args: dict[str, Any]) -> bool | str:
+        """True/False, or an error message when ask_if can't be evaluated (fail closed)."""
+        if self.require_approval:
+            return True
+        if self.ask_if is None:
+            return False
+        try:
+            verdict = self.ask_if(dict(args))
+        except Exception as exc:
+            return f"policy ask_if raised {type(exc).__name__}: fails closed"
+        if inspect.isawaitable(verdict):
+            discard_awaitable(verdict)
+            return "policy ask_if is async; it must be synchronous: fails closed"
+        return bool(verdict)

@@ -17,6 +17,10 @@ def test_demo_verdicts():
     assert "BLOCK  send_email(to='x@evil.com,ops@ourco.com'" in text
     assert "HELD   close_account" in text
     assert "sk_live_" not in text  # the withheld key never reaches the screen
+    # The model-facing reasons never name the rule or the allowlist.
+    told = [line for line in text.splitlines() if "model is told:" in line]
+    assert len(told) == 6
+    assert not any(word in " ".join(told) for word in ("at_most", "owned_by", "ourco.com", "email_domain"))
 
 
 def test_python_dash_m_toolwall_demo_runs():

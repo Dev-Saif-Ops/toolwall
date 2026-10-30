@@ -20,15 +20,70 @@ Shield and a Meter already attached, and gives you `register` + `call`.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
-from toolwall.gate import ApprovalHandler, DefaultMode, Gate, GateResult
+from toolwall import context as _context
+from toolwall.gate import ApprovalHandler, DefaultMode, Gate, GateResult, Verdict
+from toolwall.intake import ToolCall
 from toolwall.meter import Meter
 from toolwall.policy import Policy
 from toolwall.schema import ToolSchema, infer_schema_if_annotated
 from toolwall.shield import Shield
 
 ToolFn = Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class Decision:
+    """decide()'s answer for a tool call your framework will run itself.
+
+    verdict: "allow" (run it, with `args`), "deny" (don't), or "ask" (a person
+    must approve first). `reason` is safe to show the model; `detail` is the full
+    reason for your logs (secrets scrubbed). `args` are the arguments as checked,
+    redacted if the wall redacts secrets: run these, not the originals.
+    """
+
+    verdict: Literal["allow", "deny", "ask"]
+    tool: str
+    args: dict[str, Any]
+    reason: str | None = None
+    detail: str | None = None
+    receipt: str | None = None
+
+    @property
+    def allowed(self) -> bool:
+        return self.verdict == "allow"
+
+    @property
+    def denied(self) -> bool:
+        return self.verdict == "deny"
+
+    @property
+    def needs_approval(self) -> bool:
+        return self.verdict == "ask"
+
+
+@dataclass(frozen=True)
+class OutputCheck:
+    """check_output()'s answer for what a tool returned.
+
+    `value` is what may go back to the model: the original, a redacted copy, or
+    None when it was withheld. `reason` is safe to show the model.
+    """
+
+    value: Any
+    withheld: bool
+    reason: str | None = None
+    detail: str | None = None
+
+
+def _decide_only(name: str) -> ToolFn:
+    def run(**_: Any) -> Any:  # never reached: execute() refuses these first
+        raise RuntimeError(f"{name!r} is declared for decide() only")
+
+    run.__toolwall_decide_only__ = True  # type: ignore[attr-defined]
+    return run
 
 
 class ToolWall:
@@ -88,6 +143,48 @@ class ToolWall:
         )
         return self
 
+    def rule(
+        self,
+        name: str,
+        *,
+        schema: ToolSchema | None = None,
+        ask_if: Callable[[dict[str, Any]], bool] | None = None,
+        cross: Any = None,
+        require_approval: bool = False,
+        **constraints: Callable[[Any], bool],
+    ) -> "ToolWall":
+        """Set the policy for a tool in one line: argument rules as keywords.
+
+            wall.rule("issue_refund", amount=r.at_most(500), ask_if=r.over("amount", 200))
+
+        Replaces any earlier policy for the tool; a registered tool keeps its
+        function and schema (pass schema= to replace it). For a tool your framework
+        runs, there is no function to register: give schema= and the tool is
+        declared for decide() only.
+        """
+        policy = Policy(
+            constraints=dict(constraints), cross=cross,
+            require_approval=require_approval, ask_if=ask_if,
+        )
+        registry = self.gate.registry
+        if registry.get(name) is None:
+            if schema is None:
+                raise ValueError(
+                    f"{name!r} is not registered. Register its function first, or pass "
+                    "schema= to declare a tool your framework runs (decide() only)."
+                )
+            self.gate.register(name, _decide_only(name), schema, policy=policy)
+        else:
+            registry.set_policy(name, policy)
+            if schema is not None:
+                registry.set_schema(name, schema)
+        return self
+
+    def context(self, **values: Any) -> _context.context:
+        """`with wall.context(customer_id="c_42"):` makes values visible to rules
+        evaluated in this thread or task only (async-safe, nestable)."""
+        return _context.context(**values)
+
     def budget(
         self,
         *,
@@ -116,6 +213,57 @@ class ToolWall:
         Works for sync tools too. Async approval handlers are awaited here.
         """
         return await self.gate.arun({"name": name, "args": args or {}})
+
+    def decide(self, name: str, args: dict[str, Any] | None = None) -> Decision:
+        """Verdict for a call your framework will run itself: allow, deny or ask.
+
+        Every check call() makes applies (allowlist, schema, rules with the current
+        context, secrets, budget, approval). An "allow" takes a budget slot, since
+        the framework is about to run it. Nothing is executed here.
+        """
+        result = self.gate.check({"name": name, "args": args or {}})
+        # The gate isn't going to run this result, so it must not hold an issue record.
+        self.gate._issued.pop(id(result), None)
+        if result.allowed:
+            budget_reason = self.gate._reserve_budget(result.call)
+            if budget_reason is not None:
+                result = self.gate._refuse(result, budget_reason, kind="budget")
+        verdict: Literal["allow", "deny", "ask"] = (
+            "allow" if result.allowed else "ask" if result.needs_approval else "deny"
+        )
+        return Decision(
+            verdict=verdict,
+            tool=name,
+            args=dict(result.call.args) if result.call is not None else dict(args or {}),
+            reason=result.model_reason,
+            detail="; ".join(result.reasons) or None,
+            receipt=result.receipt,
+        )
+
+    async def adecide(self, name: str, args: dict[str, Any] | None = None) -> Decision:
+        """decide() for async code. Rules are synchronous, so this does not await them."""
+        return self.decide(name, args)
+
+    def check_output(self, name: str, value: Any) -> OutputCheck:
+        """Scan what a tool your framework ran returned, before the model sees it."""
+        probe = GateResult(Verdict.ALLOW, ToolCall(name=name, args={}))
+        self.gate._accept_output(probe, value)
+        withheld = probe.return_value is None and value is not None and probe.error is not None
+        if self.gate.meter is not None:
+            from toolwall.meter import RunEvent
+
+            self.gate.meter.record(RunEvent(
+                lane=self.gate.lane, kind="output", ok=not withheld,
+                namespace=self.gate._scrub(name), error=self.gate._scrub(probe.error),
+                meta={"findings": [f.kind for f in probe.findings]},
+            ))
+        return OutputCheck(
+            value=probe.return_value,
+            withheld=withheld,
+            reason=("The tool's output was withheld because it contained what looks "
+                    "like a secret or couldn't be checked.") if withheld else None,
+            detail=probe.error,
+        )
 
     def check(self, name: str, args: dict[str, Any] | None = None) -> GateResult:
         """Return the verdict without executing anything."""

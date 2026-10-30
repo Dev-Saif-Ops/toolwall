@@ -10,8 +10,7 @@ import os
 import sys
 from typing import Any
 
-from toolwall.policy import Policy, email_domain, in_range
-from toolwall.schema import ToolSchema
+from toolwall import rules as r
 from toolwall.wall import ToolWall
 
 CUSTOMER = {"id": "c_42", "email": "amal@example.com"}
@@ -36,26 +35,16 @@ def close_account(customer_id: str) -> str:
     return f"closed {customer_id}"
 
 
-def own_order(args: dict[str, Any]) -> str | None:
-    owner = ORDER_OWNER.get(args.get("order_id"))
-    if owner != CUSTOMER["id"]:
-        return "order does not belong to the signed-in customer"
-    return None
-
-
-def customer_or_ourco(value: Any) -> bool:
-    return value == CUSTOMER["email"] or email_domain("ourco.com")(value)
-
-
 def build_wall() -> ToolWall:
     wall = ToolWall()
     # Fully annotated functions get their schema from the signature.
-    wall.register("issue_refund", issue_refund,
-                  policy=Policy(constraints={"amount": in_range(0.01, 500)}, cross=own_order))
-    wall.register("send_email", send_email, schema=ToolSchema(required=["to", "body"]),
-                  policy=Policy(constraints={"to": customer_or_ourco}))
-    wall.register("lookup_customer", lookup_customer)
-    wall.register("close_account", close_account, policy=Policy(require_approval=True))
+    for fn in (issue_refund, send_email, lookup_customer, close_account):
+        wall.register(fn.__name__, fn)
+    wall.rule("issue_refund",
+              amount=r.positive() & r.at_most(500),
+              order_id=r.owned_by("customer_id", lookup=ORDER_OWNER.get))
+    wall.rule("send_email", to=r.email_domain("ourco.com") | r.equals_context("customer_email"))
+    wall.rule("close_account", require_approval=True)
     return wall
 
 
@@ -91,23 +80,26 @@ def run_demo(color: bool | None = None, out: Any = None) -> int:
     print(paint("Every verdict below comes from the real gate. No model or API key.\n", "2"), file=out)
 
     tally = {"ran": 0, "stopped": 0, "held": 0}
-    for name, args, label in SCRIPT:
-        r = wall.call(name, args)
+    with wall.context(customer_id=CUSTOMER["id"], customer_email=CUSTOMER["email"]):
+        results = [(name, args, label, wall.call(name, args)) for name, args, label in SCRIPT]
+    for name, args, label, res in results:
         call = _render_call(name, args)
-        if r.needs_approval:
+        if res.needs_approval:
             tag, note, key = paint("HELD ", "33;1"), "waiting for a human to approve", "held"
-        elif r.blocked:
-            tag, note, key = paint("BLOCK", "31;1"), r.reason, "stopped"
-        elif r.error:
-            tag, note, key = paint("ALLOW", "32;1"), f"ran, but {r.error}", "stopped"
+        elif res.blocked:
+            tag, note, key = paint("BLOCK", "31;1"), res.reason, "stopped"
+        elif res.error:
+            tag, note, key = paint("ALLOW", "32;1"), f"ran, but {res.error}", "stopped"
         else:
-            tag, note, key = paint("ALLOW", "32;1"), f"ran: {r.return_value}", "ran"
+            tag, note, key = paint("ALLOW", "32;1"), f"ran: {res.return_value}", "ran"
         tally[key] += 1
         print(f"  {tag}  {call}", file=out)
         print(paint(f"         {label}: {note}", "2"), file=out)
+        if res.model_reason:
+            print(paint(f"         model is told: {res.model_reason}", "2"), file=out)
 
     print(file=out)
     print(f"{tally['ran']} ran · {tally['stopped']} stopped · {tally['held']} waiting for a human. "
-          "Every decision is in the audit log (wall.export).", file=out)
+          "The model gets the short reason; the full one goes to the audit log.", file=out)
     print(paint("Source of this demo: python -c \"import toolwall.demo as d; print(d.__file__)\"", "2"), file=out)
     return 0

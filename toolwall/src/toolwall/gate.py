@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Any, Literal
 
 from toolwall._aio import discard_awaitable, is_async_callable
+from toolwall.context import current as current_context
 from toolwall.intake import IntakeError, ToolCall, parse_tool_calls
 from toolwall.meter import Meter, RunEvent
 from toolwall.policy import Policy
@@ -90,6 +91,19 @@ class ToolRegistry:
         if policy is not None:
             self._policies[name] = policy
 
+    def set_policy(self, name: str, policy: Policy | None) -> None:
+        if name not in self._tools:
+            raise KeyError(name)
+        if policy is None:
+            self._policies.pop(name, None)
+        else:
+            self._policies[name] = policy
+
+    def set_schema(self, name: str, schema: ToolSchema) -> None:
+        if name not in self._tools:
+            raise KeyError(name)
+        self._schemas[name] = schema
+
     def get(self, name: str) -> ToolFn | None:
         return self._tools.get(name)
 
@@ -118,6 +132,36 @@ class GateResult:
     dry_run: bool = False  # True when the gate simulated execution
     receipt: str | None = None  # fingerprint of (tool name, args) bound at check time
     receipt_spent: bool = False  # one verdict authorises one execution, not a stream
+    kind: str | None = None  # why it was blocked or held; drives model_reason
+    arg: str | None = None  # the argument a schema/policy block was about, if one
+
+    @property
+    def model_reason(self) -> str | None:
+        """A short reason that is safe to send back to the model.
+
+        It says what kind of thing went wrong and, for argument problems, which
+        argument, but never the rule, the allowlist or the value: a model that
+        is being steered by injected text should not learn how to get past the
+        policy. The full reason stays in `reasons` and the audit log.
+        """
+        if self.verdict is Verdict.ALLOW and self.error is None:
+            return None
+        if self.verdict is Verdict.NEEDS_APPROVAL:
+            return "This call needs approval from a person before it can run."
+        where = f" '{self.arg}'" if self.arg else ""
+        messages = {
+            "unknown_tool": "This tool is not available.",
+            "schema": f"The arguments don't match what this tool accepts{(' (check' + where + ')') if where else ''}.",
+            "policy": (f"The value for{where} isn't allowed for this call." if where
+                       else "This call isn't allowed by policy."),
+            "secret": "The arguments contain what looks like a secret. Remove it and try again.",
+            "budget": "The limit for calls to this tool has been reached.",
+            "approval_denied": "A person declined this call.",
+            "decide_only": "This call can't be run here.",
+        }
+        if self.verdict is Verdict.ALLOW:  # ran, but its output was withheld or it failed
+            return "The tool ran, but its output can't be shown."
+        return messages.get(self.kind or "", "This call can't be run.")
 
     @property
     def allowed(self) -> bool:
@@ -303,11 +347,11 @@ class Gate:
             pass
 
         if self.registry.get(call.name) is None:
-            return self._record(GateResult(Verdict.BLOCK, call, [f"unknown tool: {call.name!r}"]))
+            return self._record(GateResult(Verdict.BLOCK, call, [f"unknown tool: {call.name!r}"], kind="unknown_tool"))
 
         budget_reason = self._budget_violation(call)
         if budget_reason is not None:
-            return self._record(GateResult(Verdict.BLOCK, call, [budget_reason]))
+            return self._record(GateResult(Verdict.BLOCK, call, [budget_reason], kind="budget"))
 
         schema = self.registry.get_schema(call.name)
         if schema is None:
@@ -317,18 +361,23 @@ class Gate:
                         Verdict.BLOCK,
                         call,
                         [f"no schema registered for {call.name!r} and gate default is deny"],
+                        kind="unknown_tool",
                     )
                 )
         else:
             errors = schema.validate(call.args)
             if errors:
-                return self._record(GateResult(Verdict.BLOCK, call, errors))
+                bad = _first_arg_named(errors, call.args, schema)
+                return self._record(GateResult(Verdict.BLOCK, call, errors, kind="schema", arg=bad))
 
         policy = self.registry.get_policy(call.name)
         if policy is not None:
-            errors = policy.validate(call.args)
-            if errors:
-                return self._record(GateResult(Verdict.BLOCK, call, errors))
+            violations = policy.violations(call.args)
+            if violations:
+                return self._record(GateResult(
+                    Verdict.BLOCK, call, [message for _, message in violations],
+                    kind="policy", arg=violations[0][0],
+                ))
 
         findings: list[Finding] = []
         if self.shield is not None:
@@ -341,7 +390,7 @@ class Gate:
                         f"secret detected ({f.kind}) in arg {f.arg!r}" for f in findings
                     ]
                     return self._record(
-                        GateResult(Verdict.BLOCK, call, reasons, findings=findings)
+                        GateResult(Verdict.BLOCK, call, reasons, findings=findings, kind="secret")
                     )
 
         # Bind the receipt last, over the arguments as they will be executed
@@ -351,11 +400,14 @@ class Gate:
         except ReceiptError as exc:
             if self.registry.wants_receipt(call.name):
                 return self._record(
-                    GateResult(Verdict.BLOCK, call, [f"cannot bind receipt: {exc}"])
+                    GateResult(Verdict.BLOCK, call, [f"cannot bind receipt: {exc}"], kind="receipt")
                 )
             receipt = None
 
-        if policy is not None and policy.require_approval:
+        wants_approval = policy.wants_approval(call.args) if policy is not None else False
+        if isinstance(wants_approval, str):  # ask_if couldn't be evaluated: fail closed
+            return self._record(GateResult(Verdict.BLOCK, call, [wants_approval], kind="policy"))
+        if wants_approval:
             return self._record(
                 GateResult(
                     Verdict.NEEDS_APPROVAL,
@@ -363,6 +415,7 @@ class Gate:
                     [f"approval required for {call.name!r}"],
                     findings=findings,
                     receipt=receipt,
+                    kind="approval",
                 )
             )
 
@@ -505,6 +558,13 @@ class Gate:
             execute_args = frozen_args
 
         tool = self.registry.get(result.call.name)
+        if getattr(tool, "__toolwall_decide_only__", False) and invoke is None:
+            return self._refuse(
+                result,
+                f"{result.call.name!r} is declared for decide() only: your framework runs "
+                "it, so the gate has nothing to call",
+                kind="decide_only",
+            )
         # Calling an async tool synchronously only creates a coroutine: the tool would
         # not run and its output could not be scanned. Refuse before spending budget.
         if sync and invoke is None and tool is not None and is_async_callable(tool):
@@ -518,15 +578,9 @@ class Gate:
         # in check() is advisory: between it and here other threads sharing this Gate
         # may have executed, and without this a burst of parallel calls all pass a
         # max_calls=1 read at counter 0.
-        with self._lock:
-            budget_reason = self._budget_violation_locked(result.call) if self._budget else None
-            if budget_reason is None:
-                self._executed_calls += 1
-                self._executed_per_tool[result.call.name] = (
-                    self._executed_per_tool.get(result.call.name, 0) + 1
-                )
+        budget_reason = self._reserve_budget(result.call)
         if budget_reason is not None:
-            return self._refuse(result, budget_reason)
+            return self._refuse(result, budget_reason, kind="budget")
         if self.dry_run:
             result.dry_run = True
             if self.meter is not None:
@@ -546,6 +600,15 @@ class Gate:
         if invoke is not None:
             return invoke, execute_args
         return (lambda args: tool(**args)), execute_args
+
+    def _reserve_budget(self, call: ToolCall) -> str | None:
+        """Re-check the budget and take one slot in one critical section."""
+        with self._lock:
+            reason = self._budget_violation_locked(call) if self._budget else None
+            if reason is None:
+                self._executed_calls += 1
+                self._executed_per_tool[call.name] = self._executed_per_tool.get(call.name, 0) + 1
+        return reason
 
     def _accept_output(self, result: GateResult, value: Any) -> None:
         result.return_value = value
@@ -576,7 +639,7 @@ class Gate:
             )
         return result
 
-    def _refuse(self, result: GateResult, reason: str) -> GateResult:
+    def _refuse(self, result: GateResult, reason: str, kind: str = "refused") -> GateResult:
         """A refusal at execute time is a new BLOCK result, recorded like any other.
 
         The ALLOW it refuses stays as it was: rewriting it in place would make the
@@ -584,6 +647,7 @@ class Gate:
         """
         refused = copy.copy(result)
         refused.verdict = Verdict.BLOCK
+        refused.kind = kind
         refused.reasons = [*result.reasons, reason]
         refused.findings = list(result.findings)
         refused.executed = False
@@ -698,6 +762,7 @@ class Gate:
             return self._record_transition(result, "approval-granted")
         self._issued.pop(id(result), None)
         result.verdict = Verdict.BLOCK
+        result.kind = "approval_denied"
         result.reasons.append("approval denied")
         return self._record_transition(result, "approval-denied")
 
@@ -806,6 +871,7 @@ class Gate:
         # Reasons echo model-chosen tool names, arg keys and cross-rule text. They go
         # back to the model, into reports and into the audit log: scrub them once here.
         result.reasons = [self._scrub(r) for r in result.reasons]
+        result.arg = self._scrub(result.arg)
         for f in result.findings:
             f.arg = self._scrub(f.arg)
         self.history.append(result)
@@ -819,6 +885,8 @@ class Gate:
                     "verdict": result.verdict.value,
                     "default": self.default,
                     "findings": [f.kind for f in result.findings],
+                    # Which context keys were set, never their values (often personal data).
+                    "context": sorted(current_context().keys()),
                 },
             )
         return result
@@ -835,3 +903,18 @@ class Gate:
                 )
             )
         return result
+
+
+def _first_arg_named(errors: list[str], args: dict[str, Any], schema: ToolSchema) -> str | None:
+    """The argument a schema error is about, when it is one the call or schema names.
+
+    Only names already in the model's own call or in the tool's schema are
+    returned, so the model-facing reason never echoes anything else.
+    """
+    known = set(args) | set(schema.required) | set(schema.types)
+    for message in errors:
+        for name in known:
+            if isinstance(name, str) and (f"'{name}'" in message or message.endswith(f": {name}")):
+                return name
+    return None
+
