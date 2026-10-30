@@ -45,8 +45,9 @@ Every attack landed without ToolWall and was stopped with it; every honest reque
 
 The honest requests matter as much as the attacks: a wall that refused
 everything would also "stop" all eight. Remove the ownership, refund-total,
-recipient, lookup or output-scan rule and the attack it's listed for lands (and
-CI fails); the 500 cap and the approval line are backstops behind them.
+recipient, lookup, approval or output-scan rule (or make approvals reusable)
+and the attack it's listed for lands, and CI fails. The 500 cap is a backstop
+behind them.
 
 ## The rules
 
