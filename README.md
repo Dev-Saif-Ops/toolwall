@@ -201,7 +201,7 @@ toolwall sees a call only when it goes through a tool it guards. So:
   the refund API directly and never touch the guarded `issue_refund`. Default-deny
   covers calls that reach the wall; a tool added to your framework without the
   wall's adapter isn't seen at all, and the Claude Agent SDK ships a built-in Bash
-  tool (limit it with `ClaudeAgentOptions(tools=[...])` or `disallowed_tools`). A
+  tool (list only the tools the agent needs with `ClaudeAgentOptions(tools=[...])`). A
   customer-facing agent shouldn't have a shell. If one is unavoidable, sandbox it
   with no credentials and no network path to the systems that matter.
 - **Keep credentials with the tool, not the agent.** The refund tool holds the

@@ -102,10 +102,12 @@ arguments go to the tool and to the person approving.
 
 The SDK ships built-in tools (Bash, Read, Write...), and a matcher like
 `^mcp__shop__` leaves them outside the wall: they then run under your permission
-mode alone. For a customer-facing agent, turn them off:
-`ClaudeAgentOptions(tools=["mcp__shop__issue_refund", ...], hooks=...)` or
-`disallowed_tools=["Bash", ...]`. Or drop the matcher, so the wall sees every tool
-and denies the ones it doesn't know.
+mode alone. For a customer-facing agent, list only the tools it needs:
+`ClaudeAgentOptions(tools=["mcp__shop__issue_refund", ...], hooks=...)`.
+(`disallowed_tools=["Bash"]` removes Bash only; Write, WebFetch and the other
+built-ins stay.) Or drop the matcher, so the wall sees every tool and denies the
+ones it doesn't know; that includes the SDK's own helpers such as ToolSearch, so
+check that a large MCP tool set still loads.
 
 `hooks(wall, on_hold="defer")` ends the run on a held call instead of asking
 (`ResultMessage.deferred_tool_use`). A person approves the ticket

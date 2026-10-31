@@ -29,9 +29,10 @@ the other layers next to it.
   blocked. It doesn't cover tools the wall never sees. In a framework, a tool
   added without the wall's adapter (a plain `function_tool`, the SDK's hosted
   shell or code-interpreter tools) runs outside it, and the **Claude Agent SDK
-  ships built-in tools, Bash included**: limit them with
-  `ClaudeAgentOptions(tools=[...])` or `disallowed_tools=["Bash", ...]`, or use
-  a hook matcher that covers them (then the wall denies Bash, since it isn't a
+  ships built-in tools, Bash included**: list only the tools the agent needs
+  with `ClaudeAgentOptions(tools=[...])` (`disallowed_tools=["Bash"]` removes
+  Bash but leaves Write, WebFetch and the rest), or use a hook matcher that
+  covers them (then the wall denies Bash, since it isn't a
   registered tool). A customer-facing agent shouldn't have a shell at all. If
   you do give one a shell or code-execution tool through the wall, the wall sees
   the command as a string: a rule like `r.one_of(...)` can allow a short list of
@@ -56,7 +57,8 @@ the other layers next to it.
   the order"). `wall.guard()` on a raw response checks and runs one call at a
   time and doesn't have this race. Enforce money limits where the money moves
   too (a database constraint or the payments service), or cap calls with
-  `wall.budget(max_calls_per_tool=...)`.
+  `wall.budget(max_calls_per_tool=...)`, which counts over the wall's whole
+  lifetime, not per turn or per order.
 - **Secrets it can't recognise.** Detection is pattern and entropy based: it
   catches API keys, tokens and private keys, but not reliably plain passwords,
   hex-encoded secrets, or a key split into small pieces across fields.
