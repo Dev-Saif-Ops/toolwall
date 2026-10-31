@@ -43,6 +43,7 @@ _SAFE_ARG = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,39}")
 
 _UNBOUND = object()  # an issued result whose registration token isn't recorded yet
 _KEEP = object()  # ToolRegistry.update: leave this part as it is
+ABSENT = object()  # ToolRegistry.state: a name that was never registered
 
 
 class Verdict(str, Enum):
@@ -99,6 +100,11 @@ class ToolRegistry:
         Re-registering an existing name raises unless replace=True, so a stray
         second registration cannot silently swap out a tool (or drop its policy)
         behind an already-audited allowlist.
+
+        Changes take the registry's lock, and schema inference runs under it:
+        don't register from another thread and wait for it from inside a
+        tool's signature. A check that overlaps a change is blocked
+        (kind "registration"); if inference raises, the tool stays blocked.
         """
         with self._lock:
             if name in self._tools and not replace:
@@ -148,6 +154,11 @@ class ToolRegistry:
     def changing(self, name: str) -> bool:
         """A change to this tool is in progress (or failed half-way)."""
         return name in self._tokens and self._tokens[name] is None
+
+    def state(self, name: str) -> Any:
+        """The tool's registration in one read: its token, None while a change is
+        in progress, or ABSENT for a name that was never registered."""
+        return self._tokens.get(name, ABSENT)
 
     def get(self, name: str) -> ToolFn | None:
         return self._tools.get(name)
@@ -395,8 +406,10 @@ class Gate:
         # The registration the verdict will be based on, taken before anything is
         # read, so a replace racing with this check can't pair an old verdict with
         # a new function.
-        token = self.registry.token(call.name)
-        changing = self.registry.changing(call.name)
+        # One read, so "mid-change" and "which version" can't come from two
+        # different moments.
+        start = self.registry.state(call.name)
+        token = None if start is ABSENT else start
         try:
             result = self._check_one_unguarded(call)
         except Exception as exc:
@@ -407,7 +420,8 @@ class Gate:
         # check: not mid-change at the start, and unchanged at the end. Otherwise
         # it may mix old and new rules, so it's a block (decide() included, where
         # the framework would run the tool itself), not just an unrunnable result.
-        if changing or self.registry.token(call.name) != token:
+        end = self.registry.state(call.name)
+        if start is None or end != start:  # ABSENT == ABSENT: an unknown tool passes on
             with self._lock:
                 self._issued.pop(id(result), None)
             return self._record(

@@ -668,3 +668,68 @@ def test_a_check_overlapping_a_change_is_blocked_with_a_plain_reason():
     result = gate.check({"name": "pay", "args": {"amount": 1}})
     assert result.blocked and result.kind == "registration"
     assert result.model_reason == "This tool changed while the call was being checked. Try again."
+
+
+# The exact interleavings, forced: a change that finishes during the check, and
+# one that starts during it. Each must block, in decide() as in call().
+
+def _wall_with_t():
+    from toolwall import ToolWall
+    from toolwall import rules as r
+
+    wall = ToolWall(approvals=False, audit=False)
+    wall.rule("t", schema=ToolSchema(required=["x"], types={"x": int}), x=r.at_most(0))
+    return wall
+
+
+def _during_check(wall, action):
+    gate = wall.gate
+    inner = gate._check_one_unguarded
+
+    def patched(call):
+        action()
+        return inner(call)
+
+    gate._check_one_unguarded = patched
+
+
+def test_a_change_that_finishes_during_the_check_blocks():
+    wall = _wall_with_t()
+    reg = wall.gate.registry
+    reg._changing("t")                      # replace #1 in progress when the check starts
+    _during_check(wall, lambda: (reg._policies.pop("t", None), reg._bump("t")))   # it finishes, policy-less
+    decision = wall.decide("t", {"x": 1})
+    assert decision.denied and "registration" in (decision.detail or "")
+
+
+def test_a_change_that_starts_during_the_check_blocks():
+    wall = _wall_with_t()
+    reg = wall.gate.registry
+    _during_check(wall, lambda: (reg._changing("t"), reg._policies.pop("t", None)))  # replace #2 starts
+    decision = wall.decide("t", {"x": 1})
+    assert decision.denied and "registration" in (decision.detail or "")
+
+
+def test_an_unknown_tool_is_unknown_not_a_registration_change():
+    wall = _wall_with_t()
+    result = wall.gate.check({"name": "nope", "args": {}})
+    assert result.blocked and result.kind == "unknown_tool"
+
+
+def test_a_change_ending_and_another_starting_around_the_start_read_blocks():
+    # Replace #1 is in progress at the first read; it finishes right after, and
+    # replace #2 starts during the check. Start and end both read "changing":
+    # equal, but never a stable registration.
+    wall = _wall_with_t()
+    reg = wall.gate.registry
+    reg._changing("t")
+    real_changing = reg.changing
+
+    def finish_then_report(name):
+        reg._bump(name)                     # replace #1 finishes between two reads
+        return real_changing(name)
+
+    reg.changing = finish_then_report
+    _during_check(wall, lambda: (reg._changing("t"), reg._policies.pop("t", None)))
+    decision = wall.decide("t", {"x": 1})
+    assert decision.denied and "registration" in (decision.detail or "")
