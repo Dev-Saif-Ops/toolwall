@@ -36,6 +36,7 @@ from toolwall.receipt import ReceiptError, fingerprint
 Status = Literal["pending", "approved", "denied", "used", "expired"]
 
 DEFAULT_TTL = 3600.0
+DEFAULT_MAX_PENDING = 1000
 
 
 class TicketError(Exception):
@@ -81,6 +82,7 @@ def _plain(value: Any, what: str) -> Any:
 
 class ApprovalStore(Protocol):
     def add(self, ticket: Ticket) -> None: ...
+    def add_if_absent(self, ticket: Ticket, now: float, max_pending: int | None) -> Ticket: ...
     def get(self, ticket_id: str) -> Ticket | None: ...
     def find(self, digest: str, now: float) -> Ticket | None: ...
     def transition(self, ticket_id: str, from_status: Iterable[Status], to_status: Status,
@@ -99,6 +101,23 @@ class MemoryStore:
         with self._lock:
             self._prune(time.time())
             self._tickets[ticket.id] = ticket
+
+    def add_if_absent(self, ticket: Ticket, now: float, max_pending: int | None) -> Ticket:
+        """In one step: the live ticket for the same call if there is one, else
+        `ticket`, added. Raises TicketError when max_pending tickets are waiting."""
+        with self._lock:
+            self._prune(now)
+            live = [t for t in self._tickets.values()
+                    if t.digest == ticket.digest and t.status in ("pending", "approved", "denied")
+                    and now < t.expires_at]
+            if live:
+                return max(live, key=lambda t: t.created_at)
+            if max_pending is not None and sum(
+                    1 for t in self._tickets.values()
+                    if t.status == "pending" and now < t.expires_at) >= max_pending:
+                raise TicketError(f"{max_pending} tickets are already waiting for a person")
+            self._tickets[ticket.id] = ticket
+            return ticket
 
     def get(self, ticket_id: str) -> Ticket | None:
         with self._lock:
@@ -178,6 +197,42 @@ class SQLiteStore:
                  ticket.decided_at, ticket.note),
             )
 
+    def add_if_absent(self, ticket: Ticket, now: float, max_pending: int | None) -> Ticket:
+        """add_if_absent in one write transaction, so two processes opening the
+        same call get the same ticket."""
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._db.execute(
+                    "SELECT * FROM toolwall_tickets WHERE digest = ? AND expires_at > ?"
+                    " AND status IN ('pending', 'approved', 'denied')"
+                    " ORDER BY created_at DESC LIMIT 1", (ticket.digest, now)).fetchone()
+                if row is not None:
+                    self._db.execute("COMMIT")
+                    return self._ticket(row)
+                if max_pending is not None:
+                    waiting = self._db.execute(
+                        "SELECT COUNT(*) FROM toolwall_tickets WHERE status = 'pending'"
+                        " AND expires_at > ?", (now,)).fetchone()[0]
+                    if waiting >= max_pending:
+                        self._db.execute("ROLLBACK")
+                        raise TicketError(f"{max_pending} tickets are already waiting for a person")
+                self._db.execute("DELETE FROM toolwall_tickets WHERE expires_at < ?",
+                                 (ticket.created_at - 86400,))
+                self._db.execute(
+                    "INSERT INTO toolwall_tickets VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (ticket.id, ticket.tool, json.dumps(ticket.args, sort_keys=True),
+                     json.dumps(ticket.context, sort_keys=True), ticket.digest, ticket.reason,
+                     ticket.status, ticket.created_at, ticket.expires_at, ticket.decided_by,
+                     ticket.decided_at, ticket.note))
+                self._db.execute("COMMIT")
+                return ticket
+            except TicketError:
+                raise
+            except BaseException:
+                self._db.execute("ROLLBACK")
+                raise
+
     def get(self, ticket_id: str) -> Ticket | None:
         with self._lock:
             row = self._db.execute(
@@ -226,11 +281,18 @@ class SQLiteStore:
 class Approvals:
     """wall.approvals: the tickets the wall opened, and approving or denying them."""
 
-    def __init__(self, store: ApprovalStore | None = None, *, ttl: float = DEFAULT_TTL) -> None:
+    def __init__(self, store: ApprovalStore | None = None, *, ttl: float = DEFAULT_TTL,
+                 max_pending: int | None = DEFAULT_MAX_PENDING) -> None:
         if not ttl > 0:
             raise ValueError("ttl must be a positive number of seconds")
+        if max_pending is not None and (isinstance(max_pending, bool) or not isinstance(max_pending, int)
+                                        or max_pending < 1):
+            raise ValueError("max_pending must be a positive whole number, or None for no limit")
         self.store: ApprovalStore = store if store is not None else MemoryStore()
         self.ttl = float(ttl)
+        # A cap on tickets waiting for a person: past it, a held call stays held
+        # with no ticket instead of growing the queue without bound.
+        self.max_pending = max_pending
 
     # -- for people -------------------------------------------------------------
 
@@ -290,8 +352,16 @@ class Approvals:
         ticket = Ticket(id="tkt_" + secrets.token_hex(12), tool=tool, args=stored_args,
                         context=stored_ctx, digest=bound, reason=reason, status="pending",
                         created_at=now, expires_at=now + self.ttl)
-        self.store.add(ticket)
-        return ticket
+        add_if_absent = getattr(self.store, "add_if_absent", None)
+        if add_if_absent is None:  # a custom store without it: best effort
+            if self.max_pending is not None and len(self.store.list("pending")) >= self.max_pending:
+                raise TicketError(f"{self.max_pending} tickets are already waiting for a person")
+            self.store.add(ticket)
+            return ticket
+        opened = add_if_absent(ticket, now, self.max_pending)
+        if opened is not ticket and not self._intact(opened, bound):
+            raise TicketError("the stored ticket for this call was changed")
+        return opened
 
     def close(self, ticket_id: str, to: Status, *, by: str | None = None) -> bool:
         """Settle a pending or approved ticket that a framework's own approval

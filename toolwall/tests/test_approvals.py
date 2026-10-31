@@ -472,3 +472,64 @@ def test_a_denial_is_remembered_until_a_day_past_expiry_in_memory(monkeypatch):
     clock[0] += 86400
     approvals.open("t", {"a": 3}, {}, None)
     assert store.get(denied.id) is None
+
+
+# -- 0.8: opening a ticket is atomic, and the queue is capped --------------------
+
+def test_racing_opens_of_the_same_call_get_one_ticket(store):
+    approvals = Approvals(store)
+    start = threading.Barrier(12)
+    ids = []
+
+    def go():
+        start.wait()
+        ids.append(approvals.open("t", {"a": 1}, {"c": "x"}, None).id)
+
+    threads = [threading.Thread(target=go) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(set(ids)) == 1 and len(store.list("pending")) == 1
+
+
+def _open_in_process(db, n, out):
+    a = Approvals(SQLiteStore(db))
+    out.put(a.open("t", {"a": 1}, {}, None).id)
+    a.store.close()
+
+
+def test_processes_opening_the_same_call_share_one_sqlite_ticket(tmp_path):
+    import multiprocessing as mp
+
+    db = str(tmp_path / "t.db")
+    SQLiteStore(db).close()
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = [ctx.Process(target=_open_in_process, args=(db, i, q)) for i in range(6)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+    ids = {q.get(timeout=10) for _ in procs}
+    store = SQLiteStore(db)
+    assert len(ids) == 1 and len(store.list("pending")) == 1
+    store.close()
+
+
+def test_the_queue_is_capped_and_a_held_call_past_the_cap_stays_held(store):
+    wall, _, ran = refund_wall(approvals=Approvals(store, max_pending=2))
+    with wall.context(customer_id="c_42"):
+        first = wall.call("issue_refund", {"order_id": "o_9", "amount": 300}).ticket
+        wall.call("issue_refund", {"order_id": "o_9", "amount": 301})
+        third = wall.call("issue_refund", {"order_id": "o_9", "amount": 302})
+        again = wall.call("issue_refund", {"order_id": "o_9", "amount": 300})
+    assert third.needs_approval and third.ticket is None   # held, no ticket
+    assert again.ticket == first                            # an existing call keeps its ticket
+    assert len(wall.approvals.pending()) == 2 and ran == []
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True, "10"])
+def test_max_pending_must_be_a_positive_whole_number(bad):
+    with pytest.raises(ValueError):
+        Approvals(max_pending=bad)
