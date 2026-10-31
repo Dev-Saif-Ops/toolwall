@@ -196,9 +196,10 @@ Production setups want both.
 
 toolwall sees a call only when it goes through a tool it guards. An agent that also
 has a shell or code-execution tool could reach the same API directly, so don't give a
-customer-facing agent one (toolwall is default-deny: a shell tool exists only if you
-register it), and keep credentials inside the tool rather than in the agent's
-environment. What it covers and what it doesn't:
+customer-facing agent one. Default-deny covers calls that reach the wall, not tools
+added to a framework without its adapter; the Claude Agent SDK ships a built-in Bash
+tool, so limit it with `ClaudeAgentOptions(tools=[...])` or `disallowed_tools`. Keep
+credentials inside the tool rather than in the agent's environment. What it covers and what it doesn't:
 [docs/threat-model.md](https://github.com/Dev-Saif-Ops/toolwall/blob/main/docs/threat-model.md).
 
 ## Dry-run first

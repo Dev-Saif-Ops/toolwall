@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- `docs/threat-model.md`: what toolwall covers and what it doesn't (paths that
+  skip the wall, such as shell tools and the Claude Agent SDK's built-in Bash),
+  and the layers it assumes next to it. Linked from both READMEs and SECURITY.md.
 - `refund-desk/`: a reference support agent (OpenAI Agents SDK, SQLite) and eight
   attacks run with and without ToolWall, plus honest requests that must keep
   working. `python refund-desk/run.py --check` runs in CI.

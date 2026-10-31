@@ -100,6 +100,13 @@ no decision, so your permission mode and rules still apply. When the wall
 redacted a secret in the arguments (`ToolWall(redact=True)`), the clean
 arguments go to the tool and to the person approving.
 
+The SDK ships built-in tools (Bash, Read, Write...), and a matcher like
+`^mcp__shop__` leaves them outside the wall: they then run under your permission
+mode alone. For a customer-facing agent, turn them off:
+`ClaudeAgentOptions(tools=["mcp__shop__issue_refund", ...], hooks=...)` or
+`disallowed_tools=["Bash", ...]`. Or drop the matcher, so the wall sees every tool
+and denies the ones it doesn't know.
+
 `hooks(wall, on_hold="defer")` ends the run on a held call instead of asking
 (`ResultMessage.deferred_tool_use`). A person approves the ticket
 (`wall.approvals.approve`), you resume the session, and the same call runs
