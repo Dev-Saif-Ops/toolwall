@@ -733,3 +733,24 @@ def test_a_change_ending_and_another_starting_around_the_start_read_blocks():
     _during_check(wall, lambda: (reg._changing("t"), reg._policies.pop("t", None)))
     decision = wall.decide("t", {"x": 1})
     assert decision.denied and "registration" in (decision.detail or "")
+
+
+def test_a_check_parked_inside_register_between_schema_and_policy_blocks():
+    # Through the real register(): the new schema is in, the new policy isn't yet.
+    from toolwall import rules as r
+
+    wall = _wall_with_t()
+    reg = wall.gate.registry
+    seen = []
+
+    class Hook(dict):
+        def __setitem__(self, key, value):
+            if key == "t":
+                seen.append(wall.decide("t", {"x": 1}).verdict)   # a check, mid-register
+            super().__setitem__(key, value)
+
+    reg._policies = Hook(reg._policies)
+    fn = reg.get("t")
+    reg.register("t", fn, ToolSchema(required=["x"], types={"x": int}),
+                 policy=Policy(constraints={"x": r.at_most(0)}), replace=True)
+    assert seen == ["deny"]

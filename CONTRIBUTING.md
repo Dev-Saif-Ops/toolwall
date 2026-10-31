@@ -41,7 +41,7 @@ pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-Currently 554 tests (617 with `pip install -e ".[dev,integrations]"`, which adds
+Currently 609 tests (673 with `pip install -e ".[dev,integrations]"`, which adds
 the framework adapter tests), run in CI on Python 3.10 to 3.13.
 
 CI also runs a linter and a static security analyser on the library; run them

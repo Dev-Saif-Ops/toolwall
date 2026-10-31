@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.8.0] - unreleased
+## [0.8.0] - 2026-10-31
 
 Hardening, and the first rule about order.
 
@@ -13,6 +13,13 @@ Hardening, and the first rule about order.
   again right before a call runs, and in `decide()` for framework adapters.
   (Issue #1.)
 - `Approvals(max_pending=1000)`: a cap on tickets waiting for a person.
+- `docs/threat-model.md`: what toolwall covers and what it doesn't (paths that
+  skip the wall, such as shell tools and the Claude Agent SDK's built-in Bash),
+  and the layers it assumes next to it. Linked from both READMEs and SECURITY.md.
+- `refund-desk/`: a reference support agent (OpenAI Agents SDK, SQLite) and eight
+  attacks run with and without ToolWall, plus honest requests that must keep
+  working. `python refund-desk/run.py --check` runs in CI.
+- 617 to 673 tests.
 
 ### Security notes
 - A verdict is now bound to the tool's registration. Replacing a tool, or
@@ -43,16 +50,6 @@ Hardening, and the first rule about order.
   starts with "ASIA" followed by 16 capitals or digits, "highp_" followed by 36
   letters or digits), and still miss a key glued to capital letters
   ("AWSKEYAKIA...").
-
-## [Unreleased]
-
-### Added
-- `docs/threat-model.md`: what toolwall covers and what it doesn't (paths that
-  skip the wall, such as shell tools and the Claude Agent SDK's built-in Bash),
-  and the layers it assumes next to it. Linked from both READMEs and SECURITY.md.
-- `refund-desk/`: a reference support agent (OpenAI Agents SDK, SQLite) and eight
-  attacks run with and without ToolWall, plus honest requests that must keep
-  working. `python refund-desk/run.py --check` runs in CI.
 
 ## [0.7.0] - 2026-10-30
 
