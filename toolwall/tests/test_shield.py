@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from toolwall import Gate, Meter, Shield, ToolSchema, Verdict
 from toolwall.shield import shannon_entropy
 
@@ -122,3 +124,32 @@ def test_audit_export_never_contains_secret(tmp_path):
     for path in paths.values():
         content = path.read_text(encoding="utf-8")
         assert AWS_KEY not in content, f"secret leaked into {path.name}"
+
+
+# -- 0.8: keys glued to other text ------------------------------------------------
+
+GLUED = [
+    ("aws-access-key", "handing offAKIA" + "IOSFODNN7EXAMPLE"),
+    ("aws-access-key", "key=AKIA" + "IOSFODNN7EXAMPLEand more"),
+    ("aws-access-key", "tempASIA" + "IOSFODNN7EXAMPLE"),
+    ("github-token", "tokenghp_" + "a" * 36),
+    ("stripe-key", "paywithsk_live_" + "Abc123" * 4),
+    ("slack-token", "botxoxb-" + "12345678901234"),
+    ("google-api-key", "mapAIza" + "B" * 35),
+    ("jwt", "beareyJ" + "hbGciOiJIUzI1.eyJzdWIiOiIx.SflKxwRJSM"),
+]
+
+
+@pytest.mark.parametrize("kind, text", GLUED)
+def test_a_key_glued_to_a_word_is_found(kind, text):
+    assert kind in {f.kind for f in Shield(mode="block").scan(text)}
+
+
+@pytest.mark.parametrize("text", [
+    "task-management-dashboard-version-two",      # "sk-" inside a word
+    "SOUTHEASTASIAPACIFICREGION2024",              # "ASIA" inside an upper-case word
+    "MALAKIAN", "the Asian market report",
+])
+def test_ordinary_words_are_not_keys(text):
+    kinds = {f.kind for f in Shield(mode="block", entropy=False).scan(text)}
+    assert not kinds & {"aws-access-key", "openai-key"}
