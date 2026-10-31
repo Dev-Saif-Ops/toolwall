@@ -155,3 +155,77 @@ def test_an_unhashable_session_is_no_session():
     wall, _ = shop()
     with wall.context(session_id=["not", "hashable"]):
         assert wall.call("send_email", {"to": "a@b.c"}).blocked
+
+
+def test_a_sequence_ask_never_softens_a_failed_ask_if():
+    wall = ToolWall(approval=lambda result: True)
+    ran = []
+
+    @wall.protect
+    def read_file(path: str) -> str:
+        return "data"
+
+    @wall.protect
+    def http_post(url: str) -> str:
+        ran.append(url)
+        return "posted"
+
+    def broken(args):
+        raise RuntimeError("lookup down")
+
+    wall.rule("http_post", ask_if=broken)
+    wall.after("read_file", ask="http_post")
+    with wall.context(session_id="s1"):
+        assert wall.call("http_post", {"url": "u"}).blocked
+        wall.call("read_file", {"path": "/x"})
+        assert wall.call("http_post", {"url": "u"}).blocked
+    assert ran == []
+
+
+def test_block_wins_over_ask_and_dry_run_does_not_count_and_take_slot_does():
+    wall, _ = shop()
+    wall.after("lookup_customer", ask="send_email")   # block from shop() and ask: block wins
+    with wall.context(session_id="s1"):
+        wall.call("lookup_customer", {"customer_id": "c_42"})
+        assert wall.call("send_email", {"to": "a@b.c"}).blocked
+    dry, _ = shop()
+    dry.dry_run = True
+    with dry.context(session_id="s1"):
+        dry.call("lookup_customer", {"customer_id": "c_42"})
+        dry.dry_run = False
+        assert dry.call("send_email", {"to": "a@b.c"}).executed
+    fw = ToolWall()
+    fw.rule("lookup_customer", schema=ToolSchema(required=["customer_id"]), require_approval=True)
+    fw.rule("send_email", schema=ToolSchema(required=["to"]))
+    fw.after("lookup_customer", block="send_email")
+    with fw.context(session_id="s1"):
+        held = fw.decide("lookup_customer", {"customer_id": "c_42"})
+        assert fw.take_slot(held).allowed           # a person approved it in the framework
+        assert fw.decide("send_email", {"to": "a@b.c"}).denied
+
+
+def test_a_call_allowed_at_check_is_held_back_at_execute_if_an_ask_trigger_ran_in_between():
+    wall = ToolWall()
+    ran = []
+
+    @wall.protect
+    def read_file(path: str) -> str:
+        return "data"
+
+    @wall.protect
+    def http_post(url: str) -> str:
+        ran.append(url)
+        return "posted"
+
+    wall.after("read_file", ask="http_post")
+    with wall.context(session_id="s1"):
+        checked = wall.gate.check({"name": "http_post", "args": {"url": "u"}})
+        wall.call("read_file", {"path": "/x"})
+        assert not wall.gate.execute(checked).executed
+    assert ran == []
+
+
+def test_no_session_has_its_own_model_reason():
+    wall, _ = shop()
+    blocked = wall.call("send_email", {"to": "a@b.c"})
+    assert blocked.model_reason == "This call can't be checked without a conversation session."

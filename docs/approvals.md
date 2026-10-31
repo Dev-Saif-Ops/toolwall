@@ -99,7 +99,10 @@ refused rather than run twice.
 
 The queue is capped: `Approvals(store, max_pending=1000)` is the default. Past
 the cap, a held call stays held with no ticket instead of growing the queue
-without bound (`max_pending=None` removes the cap). Opening a ticket is one
+without bound (`max_pending=None` removes the cap). The cap is shared: one
+user holding many distinct calls can fill it, and then nobody gets a new ticket
+until some expire (calls stay held, so this fails closed). Use a store per
+tenant, or a shorter `ttl`, if that matters for you. Opening a ticket is one
 step in the store, so two workers holding the same call get the same ticket.
 
 - `MemoryStore` (the default): this process only, lost on restart.

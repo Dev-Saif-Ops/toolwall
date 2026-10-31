@@ -94,13 +94,14 @@ class Sequences:
 
     def check(self, tool: str, ctx: Mapping[str, Any]) -> tuple[str, str] | None:
         """None (no rule applies, or none is triggered), or (kind, reason) where
-        kind is "block" or "ask". A rule that applies with no session blocks."""
+        kind is "block", "ask", or "no_session" (a rule applies but the context
+        has no session: treat it as a block)."""
         rules = [r for r in self.rules if r.then == tool]
         if not rules:
             return None
         session = self._session(ctx)
         if session is None:
-            return ("block", f"sequence rules apply to {tool!r} but the context has no "
+            return ("no_session", f"sequence rules apply to {tool!r} but the context has no "
                              f"{self.session_key!r}: fails closed")
         with self._lock:
             ran = set(self._ran.get(session, ()))

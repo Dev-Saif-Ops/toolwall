@@ -51,9 +51,10 @@ the other layers next to it.
 - **Sequences of calls, beyond the rules you write.** `wall.after(...)` covers
   "once A has run in this session, B is refused or waits for a person", but it
   knows tool names, not data: it doesn't follow what was read into a later
-  call's arguments. Sessions are remembered in one process (the most recent
-  100,000 by default), not across processes. A framework branch that is
-  abandoned still counts as having run.
+  call's arguments. Sessions are remembered in one process, not across
+  processes, and only the most recent 100,000 (`Sequences(max_sessions=...)`):
+  once a session is pushed out by newer ones, its rules stop applying to it. A
+  framework branch that is abandoned still counts as having run.
 - **Calls checked together.** When a framework runs a turn's tool calls
   concurrently (the OpenAI Agents SDK does by default), their checks can all
   happen before any of them runs, so two calls in one turn can each pass a rule

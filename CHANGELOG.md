@@ -20,14 +20,27 @@ Hardening, and the first rule about order.
   instead of running different code on a valid receipt. (Issue #4.)
 - Opening an approval ticket is atomic in both stores, so two workers holding the
   same call share one ticket (SQLite: one write transaction).
-- Keys with a distinctive prefix (AWS, Google, GitHub, Stripe, Slack, JWT) are
-  found when glued to other text ("offAKIA..."), and AWS temporary `ASIA` keys
-  are recognised. The OpenAI `sk-` prefix keeps its left boundary, since it
-  appears inside ordinary words.
+- Keys with a distinctive prefix (AWS, Google, GitHub, Slack, JWT) are found
+  when glued to other text ("offAKIA..."), and AWS temporary `ASIA` keys are
+  recognised. The OpenAI `sk-` and Stripe prefixes keep a left boundary, since
+  they appear inside ordinary words.
+- Registration changes are now tracked as they start, and a verdict is bound
+  only if the registration was stable for the whole check, so a tool replaced
+  while traffic is flowing never runs on the old verdict.
 
 ### Known limits
 - Sequence rules know tool names, not data, and remember sessions in one
-  process (the most recent 100,000).
+  process: only the most recent 100,000, and a session pushed out by newer ones
+  stops being checked. Tool names in `wall.after()` aren't checked against the
+  registry, so a misspelled name never fires.
+- An approval given before a sequence trigger ran (a policy ticket, or a
+  handler approving at the same moment) still satisfies a later sequence "ask"
+  for the same call.
+- The `max_pending` cap is shared across users; see docs/approvals.md.
+- The wider key patterns can flag some ordinary strings (an order id that
+  starts with "ASIA" followed by 16 capitals or digits, "highp_" followed by 36
+  letters or digits), and still miss a key glued to capital letters
+  ("AWSKEYAKIA...").
 
 ## [Unreleased]
 

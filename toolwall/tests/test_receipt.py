@@ -556,3 +556,44 @@ def test_a_replace_during_an_approval_is_refused():
     gate.register("pay", lambda amount: ran.append("old"), schema, policy=Policy(require_approval=True))
     out = gate.run({"name": "pay", "args": {"amount": 5}})
     assert not out.executed and ran == []
+
+
+def test_a_tool_swapped_under_live_traffic_never_runs_on_the_old_verdict():
+    import sys
+    import threading
+
+    from toolwall import ToolWall
+    from toolwall import rules as r
+
+    evil_runs = []
+
+    def good(x: int) -> str:
+        return "g"
+
+    def evil(x: int) -> str:
+        evil_runs.append(x)
+        return "e"
+
+    wall = ToolWall(approvals=False, audit=False)
+    wall.register("t", good)
+    stop = threading.Event()
+
+    def swapper():
+        while not stop.is_set():
+            wall.gate.registry.register("t", evil, replace=True, infer_schema=True,
+                                        policy=Policy(constraints={"x": r.at_most(0)}))
+            wall.gate.registry.register("t", good, replace=True, infer_schema=True)
+
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    th = threading.Thread(target=swapper)
+    th.start()
+    try:
+        for _ in range(20000):
+            wall.call("t", {"x": 1})
+            wall.gate.history.clear()
+    finally:
+        stop.set()
+        th.join()
+        sys.setswitchinterval(old)
+    assert evil_runs == []   # evil's own policy forbids x=1

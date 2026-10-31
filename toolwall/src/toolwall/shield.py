@@ -30,14 +30,16 @@ Mode = Literal["redact", "block", "warn"]
 
 # Keys with a distinctive prefix are matched even when glued to other text
 # ("offAKIA...", "key=ghp_..."): a word boundary there would let a secret pasted
-# into a sentence without a space slip through. The OpenAI "sk-" prefix is too
-# common inside ordinary words ("task-...") to drop its left boundary.
+# into a sentence without a space slip through. The OpenAI "sk-" and Stripe
+# prefixes are too common inside ordinary words to drop their left boundary.
 DEFAULT_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("private-key-block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("aws-access-key", re.compile(r"(?<![A-Z])(?:AKIA|ASIA)[0-9A-Z]{16}")),
     ("google-api-key", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
     ("github-token", re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}")),
-    ("stripe-key", re.compile(r"[rs]k_(?:live|test)_[A-Za-z0-9]{16,}")),
+    # "sk_test_"/"rk_live_" turn up inside ordinary words ("risk_test_",
+    # "desk_live_"), so Stripe keeps a left boundary (an underscore still glues).
+    ("stripe-key", re.compile(r"(?<![A-Za-z0-9])[rs]k_(?:live|test)_[A-Za-z0-9]{16,}")),
     ("slack-token", re.compile(r"xox[baprs]-[A-Za-z0-9\-]{10,}")),
     ("openai-key", re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{20,}")),
     ("jwt", re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{4,}")),

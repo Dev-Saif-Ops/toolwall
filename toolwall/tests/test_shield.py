@@ -133,7 +133,7 @@ GLUED = [
     ("aws-access-key", "key=AKIA" + "IOSFODNN7EXAMPLEand more"),
     ("aws-access-key", "tempASIA" + "IOSFODNN7EXAMPLE"),
     ("github-token", "tokenghp_" + "a" * 36),
-    ("stripe-key", "paywithsk_live_" + "Abc123" * 4),
+    ("stripe-key", "pay_sk_live_" + "Abc123" * 4),
     ("slack-token", "botxoxb-" + "12345678901234"),
     ("google-api-key", "mapAIza" + "B" * 35),
     ("jwt", "beareyJ" + "hbGciOiJIUzI1.eyJzdWIiOiIx.SflKxwRJSM"),
@@ -149,7 +149,8 @@ def test_a_key_glued_to_a_word_is_found(kind, text):
     "task-management-dashboard-version-two",      # "sk-" inside a word
     "SOUTHEASTASIAPACIFICREGION2024",              # "ASIA" inside an upper-case word
     "MALAKIAN", "the Asian market report",
+    "risk_test_results_2024_abcdefghij", "desk_live_" + "a1" * 10,
 ])
 def test_ordinary_words_are_not_keys(text):
     kinds = {f.kind for f in Shield(mode="block", entropy=False).scan(text)}
-    assert not kinds & {"aws-access-key", "openai-key"}
+    assert not kinds & {"aws-access-key", "openai-key", "stripe-key"}

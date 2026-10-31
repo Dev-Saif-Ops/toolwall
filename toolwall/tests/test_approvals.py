@@ -477,24 +477,35 @@ def test_a_denial_is_remembered_until_a_day_past_expiry_in_memory(monkeypatch):
 # -- 0.8: opening a ticket is atomic, and the queue is capped --------------------
 
 def test_racing_opens_of_the_same_call_get_one_ticket(store):
-    approvals = Approvals(store)
-    start = threading.Barrier(12)
-    ids = []
+    import sys
 
-    def go():
-        start.wait()
-        ids.append(approvals.open("t", {"a": 1}, {"c": "x"}, None).id)
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # switch threads as often as possible: make the race real
+    try:
+        for round_ in range(10):
+            approvals = Approvals(store)
+            start = threading.Barrier(12)
+            ids = []
 
-    threads = [threading.Thread(target=go) for _ in range(12)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert len(set(ids)) == 1 and len(store.list("pending")) == 1
+            def go():
+                start.wait()
+                ids.append(approvals.open("t", {"a": round_}, {"c": "x"}, None).id)
+
+            threads = [threading.Thread(target=go) for _ in range(12)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            assert len(set(ids)) == 1
+        assert len(store.list("pending")) == 10
+    finally:
+        sys.setswitchinterval(old)
 
 
-def _open_in_process(db, n, out):
+def _open_in_process(db, ready, go, out):
     a = Approvals(SQLiteStore(db))
+    ready.set()
+    go.wait(30)  # every process opens at the same moment
     out.put(a.open("t", {"a": 1}, {}, None).id)
     a.store.close()
 
@@ -505,10 +516,14 @@ def test_processes_opening_the_same_call_share_one_sqlite_ticket(tmp_path):
     db = str(tmp_path / "t.db")
     SQLiteStore(db).close()
     ctx = mp.get_context("spawn")
-    q = ctx.Queue()
-    procs = [ctx.Process(target=_open_in_process, args=(db, i, q)) for i in range(6)]
+    q, go = ctx.Queue(), ctx.Event()
+    readies = [ctx.Event() for _ in range(6)]
+    procs = [ctx.Process(target=_open_in_process, args=(db, readies[i], go, q)) for i in range(6)]
     for p in procs:
         p.start()
+    for r_ in readies:
+        assert r_.wait(60)
+    go.set()
     for p in procs:
         p.join(60)
     ids = {q.get(timeout=10) for _ in procs}

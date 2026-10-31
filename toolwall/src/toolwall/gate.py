@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import itertools
 import re
 import threading
 import weakref
@@ -63,12 +64,17 @@ class ToolRegistry:
     # A token per tool, changed by every register/replace and schema or policy
     # change. A verdict is bound to the token in effect when it was checked, so a
     # tool swapped (or re-ruled) between check and execute never runs on it.
-    _tokens: dict[str, int] = field(default_factory=dict)
-    _epoch: int = 0
+    # None while a change is in progress, so a check that overlaps the change
+    # can't be bound to it. itertools.count is atomic, so two changes racing
+    # can't share a token.
+    _tokens: dict[str, int | None] = field(default_factory=dict)
+    _counter: Any = field(default_factory=lambda: itertools.count(1))
+
+    def _changing(self, name: str) -> None:
+        self._tokens[name] = None
 
     def _bump(self, name: str) -> None:
-        self._epoch += 1
-        self._tokens[name] = self._epoch
+        self._tokens[name] = next(self._counter)
 
     def token(self, name: str) -> int | None:
         return self._tokens.get(name)
@@ -95,6 +101,7 @@ class ToolRegistry:
                 f"tool {name!r} is already registered; pass replace=True to override it "
                 "(re-registering silently would change what the allowlist permits)"
             )
+        self._changing(name)
         # A replace is a full re-registration: drop the old schema/policy so a
         # new tool can never inherit constraints written for the previous one.
         self._schemas.pop(name, None)
@@ -114,6 +121,7 @@ class ToolRegistry:
     def set_policy(self, name: str, policy: Policy | None) -> None:
         if name not in self._tools:
             raise KeyError(name)
+        self._changing(name)
         if policy is None:
             self._policies.pop(name, None)
         else:
@@ -123,6 +131,7 @@ class ToolRegistry:
     def set_schema(self, name: str, schema: ToolSchema) -> None:
         if name not in self._tools:
             raise KeyError(name)
+        self._changing(name)
         self._schemas[name] = schema
         self._bump(name)
 
@@ -190,6 +199,7 @@ class GateResult:
             "approval_denied": "A person declined this call.",
             "decide_only": "This call can't be run here.",
             "sequence": "This call isn't allowed after an earlier step in this conversation.",
+            "no_session": "This call can't be checked without a conversation session.",
         }
         if self.verdict is Verdict.ALLOW:  # ran, but its output was withheld or it failed
             return "The tool ran, but its output can't be shown."
@@ -377,10 +387,14 @@ class Gate:
             return self._record(
                 GateResult(Verdict.BLOCK, call, [f"gate could not check the call ({type(exc).__name__}): fails closed"])
             )
-        with self._lock:
-            entry = self._issued.get(id(result))
-            if entry is not None and entry[0]() is result:
-                entry[4] = token
+        # Bind only if the registration was stable for the whole check: unchanged
+        # and not mid-change. Otherwise the verdict may mix old and new rules, and
+        # the result stays unbound (never runnable).
+        if token is not None and self.registry.token(call.name) == token:
+            with self._lock:
+                entry = self._issued.get(id(result))
+                if entry is not None and entry[0]() is result:
+                    entry[4] = token
         return result
 
     def _check_one_unguarded(self, call: ToolCall) -> GateResult:
@@ -452,13 +466,20 @@ class Gate:
                 )
             receipt = None
 
+        wants_approval = policy.wants_approval(call.args) if policy is not None else False
+        if isinstance(wants_approval, str):  # ask_if couldn't be evaluated: fail closed
+            return self._record(GateResult(Verdict.BLOCK, call, [wants_approval], kind="policy"))
+
+        # Sequence rules come after every per-call check, so they can only make a
+        # call stricter: a block stays a block, and an "ask" never softens one.
         if self.sequences is not None:
             from toolwall import context as _context
 
             seq = self.sequences.check(call.name, _context.current())
-            if seq is not None and seq[0] == "block":
+            if seq is not None and seq[0] in ("block", "no_session"):
                 return self._record(
-                    GateResult(Verdict.BLOCK, call, [seq[1]], findings=findings, kind="sequence")
+                    GateResult(Verdict.BLOCK, call, [seq[1]], findings=findings,
+                               kind="sequence" if seq[0] == "block" else "no_session")
                 )
             if seq is not None:
                 return self._record(
@@ -466,9 +487,6 @@ class Gate:
                                receipt=receipt, kind="approval")
                 )
 
-        wants_approval = policy.wants_approval(call.args) if policy is not None else False
-        if isinstance(wants_approval, str):  # ask_if couldn't be evaluated: fail closed
-            return self._record(GateResult(Verdict.BLOCK, call, [wants_approval], kind="policy"))
         if wants_approval:
             return self._record(
                 GateResult(
@@ -588,7 +606,10 @@ class Gate:
             )
         # The verdict holds for the tool, schema and policy registered when it was
         # checked. Replaced or re-ruled since: refuse, before any budget is spent.
-        if token is _UNBOUND or token != self.registry.token(checked_name):
+        # Take the function first, then compare: a replace after this point can't
+        # change which function runs, and one before it changes the token.
+        tool = self.registry.get(checked_name)
+        if token is _UNBOUND or token is None or token != self.registry.token(checked_name):
             return self._refuse(
                 result, "tool was re-registered (or its rules changed) between check and "
                 "execute; re-check the call"
@@ -626,7 +647,6 @@ class Gate:
             # result keeps the checked args; the hash just proved the two identical.
             execute_args = frozen_args
 
-        tool = self.registry.get(result.call.name)
         if getattr(tool, "__toolwall_decide_only__", False) and invoke is None:
             return self._refuse(
                 result,
@@ -649,7 +669,7 @@ class Gate:
             from toolwall import context as _context
 
             seq = self.sequences.check(result.call.name, _context.current())
-            if seq is not None and (seq[0] == "block" or result.kind != "approval"):
+            if seq is not None and (seq[0] != "ask" or result.kind != "approval"):
                 return self._refuse(result, seq[1] + " (since it was checked)", kind="sequence")
 
         # Re-check the budget and reserve the slot in one critical section. The check
