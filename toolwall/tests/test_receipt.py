@@ -487,3 +487,72 @@ def test_issue_records_do_not_outlive_their_results():
     gate.history.clear()
     gc.collect()
     assert len(gate._issued) == 0
+
+
+# -- issue #4: the verdict is bound to the tool's registration -------------------
+
+def _registered_gate():
+    from toolwall import Gate, ToolSchema
+
+    ran = []
+    gate = Gate()
+    gate.register("pay", lambda amount: ran.append(("old", amount)) or "old",
+                  ToolSchema(required=["amount"], types={"amount": int}))
+    return gate, ran
+
+
+def test_a_tool_replaced_between_check_and_execute_does_not_run():
+    from toolwall import ToolSchema
+
+    gate, ran = _registered_gate()
+    result = gate.check({"name": "pay", "args": {"amount": 5}})
+    assert result.allowed
+    gate.register("pay", lambda amount: ran.append(("new", amount)) or "new",
+                  ToolSchema(required=["amount"], types={"amount": int}), replace=True)
+    out = gate.execute(result)
+    assert not out.executed and ran == []
+    assert "re-registered" in out.reasons[-1]
+
+
+def test_rules_changed_between_check_and_execute_refuse_the_old_verdict():
+    from toolwall import Policy, ToolSchema, in_range
+
+    gate, ran = _registered_gate()
+    result = gate.check({"name": "pay", "args": {"amount": 5}})
+    gate.registry.set_policy("pay", Policy(constraints={"amount": in_range(0, 1)}))
+    assert not gate.execute(result).executed
+    gate.registry.set_policy("pay", None)
+    result = gate.check({"name": "pay", "args": {"amount": 5}})
+    assert result.allowed
+    gate.registry.set_schema("pay", ToolSchema(required=["amount"], types={"amount": int}))
+    assert not gate.execute(result).executed
+    assert ran == []
+
+
+def test_an_unchanged_registration_still_runs_and_a_fresh_check_after_replace_runs_the_new_tool():
+    from toolwall import ToolSchema
+
+    gate, ran = _registered_gate()
+    assert gate.execute(gate.check({"name": "pay", "args": {"amount": 1}})).executed
+    gate.register("pay", lambda amount: ran.append(("new", amount)) or "new",
+                  ToolSchema(required=["amount"], types={"amount": int}), replace=True)
+    assert gate.execute(gate.check({"name": "pay", "args": {"amount": 2}})).executed
+    assert ran == [("old", 1), ("new", 2)]
+
+
+def test_a_replace_during_an_approval_is_refused():
+    from toolwall import Gate, Policy, ToolSchema
+
+    ran = []
+    schema = ToolSchema(required=["amount"], types={"amount": int})
+
+    def approve(result):
+        # Someone swaps the tool while a person is looking at the call.
+        gate.register("pay", lambda amount: ran.append("new"), schema,
+                      policy=Policy(require_approval=True), replace=True)
+        return True
+
+    gate = Gate(approval=approve)
+    gate.register("pay", lambda amount: ran.append("old"), schema, policy=Policy(require_approval=True))
+    out = gate.run({"name": "pay", "args": {"amount": 5}})
+    assert not out.executed and ran == []

@@ -40,6 +40,9 @@ ApprovalHandler = Callable[["GateResult"], bool]
 _SAFE_ARG = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,39}")
 
 
+_UNBOUND = object()  # an issued result whose registration token isn't recorded yet
+
+
 class Verdict(str, Enum):
     ALLOW = "allow"
     BLOCK = "block"
@@ -57,6 +60,18 @@ class ToolRegistry:
     _schemas: dict[str, ToolSchema] = field(default_factory=dict)
     _policies: dict[str, Policy] = field(default_factory=dict)
     _unreceipted: set[str] = field(default_factory=set)
+    # A token per tool, changed by every register/replace and schema or policy
+    # change. A verdict is bound to the token in effect when it was checked, so a
+    # tool swapped (or re-ruled) between check and execute never runs on it.
+    _tokens: dict[str, int] = field(default_factory=dict)
+    _epoch: int = 0
+
+    def _bump(self, name: str) -> None:
+        self._epoch += 1
+        self._tokens[name] = self._epoch
+
+    def token(self, name: str) -> int | None:
+        return self._tokens.get(name)
 
     def register(
         self,
@@ -94,6 +109,7 @@ class ToolRegistry:
             self._schemas[name] = schema_from_signature(fn)
         if policy is not None:
             self._policies[name] = policy
+        self._bump(name)
 
     def set_policy(self, name: str, policy: Policy | None) -> None:
         if name not in self._tools:
@@ -102,11 +118,13 @@ class ToolRegistry:
             self._policies.pop(name, None)
         else:
             self._policies[name] = policy
+        self._bump(name)
 
     def set_schema(self, name: str, schema: ToolSchema) -> None:
         if name not in self._tools:
             raise KeyError(name)
         self._schemas[name] = schema
+        self._bump(name)
 
     def get(self, name: str) -> ToolFn | None:
         return self._tools.get(name)
@@ -345,12 +363,21 @@ class Gate:
     def _check_one(self, call: ToolCall) -> GateResult:
         # Anything that raises while deciding is a BLOCK, not an exception for the
         # caller's error handling to interpret (deep nesting, hostile objects).
+        # The registration the verdict will be based on, taken before anything is
+        # read, so a replace racing with this check can't pair an old verdict with
+        # a new function.
+        token = self.registry.token(call.name)
         try:
-            return self._check_one_unguarded(call)
+            result = self._check_one_unguarded(call)
         except Exception as exc:
             return self._record(
                 GateResult(Verdict.BLOCK, call, [f"gate could not check the call ({type(exc).__name__}): fails closed"])
             )
+        with self._lock:
+            entry = self._issued.get(id(result))
+            if entry is not None and entry[0]() is result:
+                entry[4] = token
+        return result
 
     def _check_one_unguarded(self, call: ToolCall) -> GateResult:
         # Take our own copy before anything is validated. The caller still holds a
@@ -533,13 +560,20 @@ class Gate:
                 "runnable (a held call needs a granted approval); re-check the call "
                 "instead of replaying an approved result",
             )
-        _, checked_name, receipt, _ = issued
+        _, checked_name, receipt, _, token = issued
 
         # Code holding the result (an approval handler included) can edit it. The
         # tool, and for receipted tools the arguments, must be what was checked.
         if result.call.name != checked_name:
             return self._refuse(
                 result, "tool changed between check and execute; refusing to run it"
+            )
+        # The verdict holds for the tool, schema and policy registered when it was
+        # checked. Replaced or re-ruled since: refuse, before any budget is spent.
+        if token is _UNBOUND or token != self.registry.token(checked_name):
+            return self._refuse(
+                result, "tool was re-registered (or its rules changed) between check and "
+                "execute; re-check the call"
             )
 
         execute_args = result.call.args  # unreceipted opt-out runs the live args
@@ -921,7 +955,10 @@ class Gate:
 
         runnable = result.verdict is Verdict.ALLOW  # held calls need a granted approval
         with self._lock:
-            self._issued[key] = [weakref.ref(result, forget), result.call.name, result.receipt, runnable]
+            # The last slot is the tool's registration token, filled in by
+            # _check_one once the check is done (None until then: never runnable).
+            self._issued[key] = [weakref.ref(result, forget), result.call.name, result.receipt,
+                                 runnable, _UNBOUND]
 
     def _record(self, result: GateResult) -> GateResult:
         if result.call is not None and result.verdict in (Verdict.ALLOW, Verdict.NEEDS_APPROVAL):
