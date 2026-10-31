@@ -193,6 +193,25 @@ And what toolwall is **not**: it is not a sandbox. A sandbox isolates the *proce
 toolwall authorizes the *call*. They solve different layers, and a serious production
 setup wants both, alongside least privilege and network policy.
 
+## What it doesn't cover
+
+toolwall sees a call only when it goes through a tool it guards. So:
+
+- **An agent with a shell or code-execution tool can go around it.** It could call
+  the refund API directly and never touch the guarded `issue_refund`. toolwall is
+  default-deny, so a shell tool exists only if you register one; a customer-facing
+  agent shouldn't have one. If one is unavoidable, sandbox it with no credentials
+  and no network path to the systems that matter.
+- **Keep credentials with the tool, not the agent.** The refund tool holds the
+  payments key; the agent's own process doesn't. Then a direct call from anywhere
+  else has nothing to authenticate with.
+- It doesn't stop prompt injection itself (it limits what an injected agent can do
+  through its tools), doesn't read MCP tool descriptions, doesn't see what a tool's
+  code changes beyond its return value, and checks calls one at a time.
+
+The full list, and how it fits next to a sandbox, least-privilege credentials and
+network policy: [docs/threat-model.md](docs/threat-model.md).
+
 ## How to use
 
 ### 1. Install

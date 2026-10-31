@@ -194,6 +194,13 @@ workspace or framework:
 It is **not** a sandbox. A sandbox isolates the process; `toolwall` authorizes the call.
 Production setups want both.
 
+toolwall sees a call only when it goes through a tool it guards. An agent that also
+has a shell or code-execution tool could reach the same API directly, so don't give a
+customer-facing agent one (toolwall is default-deny: a shell tool exists only if you
+register it), and keep credentials inside the tool rather than in the agent's
+environment. What it covers and what it doesn't:
+[docs/threat-model.md](https://github.com/Dev-Saif-Ops/toolwall/blob/main/docs/threat-model.md).
+
 ## Dry-run first
 
 ```python

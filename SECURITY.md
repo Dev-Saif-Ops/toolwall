@@ -68,6 +68,10 @@ are welcome as issues:
   recipients instead of `email_domain`
 - the verdict covers the arguments, not the state of the world: a resource
   swapped after the check is outside what the gate can see
+- paths that don't go through a guarded tool: an agent with a shell or
+  code-execution tool, or network access from its own runtime, calling an API
+  directly. See [docs/threat-model.md](docs/threat-model.md) for what toolwall
+  covers and the layers it assumes next to it.
 
 ## What happens next
 
