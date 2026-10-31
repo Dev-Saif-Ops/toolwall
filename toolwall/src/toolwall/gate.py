@@ -42,6 +42,7 @@ _SAFE_ARG = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,39}")
 
 
 _UNBOUND = object()  # an issued result whose registration token isn't recorded yet
+_KEEP = object()  # ToolRegistry.update: leave this part as it is
 
 
 class Verdict(str, Enum):
@@ -69,6 +70,9 @@ class ToolRegistry:
     # can't share a token.
     _tokens: dict[str, int | None] = field(default_factory=dict)
     _counter: Any = field(default_factory=lambda: itertools.count(1))
+    # Changes are serialised (one writer at a time), so two overlapping changes
+    # to one tool can't interleave. Checks never take it: the hot path is unchanged.
+    _lock: Any = field(default_factory=threading.RLock)
 
     def _changing(self, name: str) -> None:
         self._tokens[name] = None
@@ -96,44 +100,54 @@ class ToolRegistry:
         second registration cannot silently swap out a tool (or drop its policy)
         behind an already-audited allowlist.
         """
-        if name in self._tools and not replace:
-            raise ValueError(
-                f"tool {name!r} is already registered; pass replace=True to override it "
-                "(re-registering silently would change what the allowlist permits)"
-            )
-        self._changing(name)
-        # A replace is a full re-registration: drop the old schema/policy so a
-        # new tool can never inherit constraints written for the previous one.
-        self._schemas.pop(name, None)
-        self._policies.pop(name, None)
-        self._unreceipted.discard(name)
-        self._tools[name] = fn
-        if not receipt:
-            self._unreceipted.add(name)
-        if schema is not None:
-            self._schemas[name] = schema
-        elif infer_schema:
-            self._schemas[name] = schema_from_signature(fn)
-        if policy is not None:
-            self._policies[name] = policy
-        self._bump(name)
+        with self._lock:
+            if name in self._tools and not replace:
+                raise ValueError(
+                    f"tool {name!r} is already registered; pass replace=True to override it "
+                    "(re-registering silently would change what the allowlist permits)"
+                )
+            self._changing(name)
+            # A replace is a full re-registration: drop the old schema/policy so a
+            # new tool can never inherit constraints written for the previous one.
+            self._schemas.pop(name, None)
+            self._policies.pop(name, None)
+            self._unreceipted.discard(name)
+            self._tools[name] = fn
+            if not receipt:
+                self._unreceipted.add(name)
+            if schema is not None:
+                self._schemas[name] = schema
+            elif infer_schema:
+                self._schemas[name] = schema_from_signature(fn)  # raising leaves it changing: closed
+            if policy is not None:
+                self._policies[name] = policy
+            self._bump(name)
+
+    def update(self, name: str, *, schema: ToolSchema | None = None,
+               policy: Policy | None | object = _KEEP) -> None:
+        """Change a registered tool's policy and/or schema as one change."""
+        with self._lock:
+            if name not in self._tools:
+                raise KeyError(name)
+            self._changing(name)
+            if policy is not _KEEP:
+                if policy is None:
+                    self._policies.pop(name, None)
+                else:
+                    self._policies[name] = policy  # type: ignore[assignment]
+            if schema is not None:
+                self._schemas[name] = schema
+            self._bump(name)
 
     def set_policy(self, name: str, policy: Policy | None) -> None:
-        if name not in self._tools:
-            raise KeyError(name)
-        self._changing(name)
-        if policy is None:
-            self._policies.pop(name, None)
-        else:
-            self._policies[name] = policy
-        self._bump(name)
+        self.update(name, policy=policy)
 
     def set_schema(self, name: str, schema: ToolSchema) -> None:
-        if name not in self._tools:
-            raise KeyError(name)
-        self._changing(name)
-        self._schemas[name] = schema
-        self._bump(name)
+        self.update(name, schema=schema)
+
+    def changing(self, name: str) -> bool:
+        """A change to this tool is in progress (or failed half-way)."""
+        return name in self._tokens and self._tokens[name] is None
 
     def get(self, name: str) -> ToolFn | None:
         return self._tools.get(name)
@@ -200,6 +214,7 @@ class GateResult:
             "decide_only": "This call can't be run here.",
             "sequence": "This call isn't allowed after an earlier step in this conversation.",
             "no_session": "This call can't be checked without a conversation session.",
+            "registration": "This tool changed while the call was being checked. Try again.",
         }
         if self.verdict is Verdict.ALLOW:  # ran, but its output was withheld or it failed
             return "The tool ran, but its output can't be shown."
@@ -381,16 +396,26 @@ class Gate:
         # read, so a replace racing with this check can't pair an old verdict with
         # a new function.
         token = self.registry.token(call.name)
+        changing = self.registry.changing(call.name)
         try:
             result = self._check_one_unguarded(call)
         except Exception as exc:
             return self._record(
                 GateResult(Verdict.BLOCK, call, [f"gate could not check the call ({type(exc).__name__}): fails closed"])
             )
-        # Bind only if the registration was stable for the whole check: unchanged
-        # and not mid-change. Otherwise the verdict may mix old and new rules, and
-        # the result stays unbound (never runnable).
-        if token is not None and self.registry.token(call.name) == token:
+        # The verdict is only good if the registration was stable for the whole
+        # check: not mid-change at the start, and unchanged at the end. Otherwise
+        # it may mix old and new rules, so it's a block (decide() included, where
+        # the framework would run the tool itself), not just an unrunnable result.
+        if changing or self.registry.token(call.name) != token:
+            with self._lock:
+                self._issued.pop(id(result), None)
+            return self._record(
+                GateResult(Verdict.BLOCK, call,
+                           ["the tool's registration changed while the call was being checked; "
+                            "re-check it"], kind="registration")
+            )
+        if token is not None:
             with self._lock:
                 entry = self._issued.get(id(result))
                 if entry is not None and entry[0]() is result:
@@ -670,7 +695,8 @@ class Gate:
 
             seq = self.sequences.check(result.call.name, _context.current())
             if seq is not None and (seq[0] != "ask" or result.kind != "approval"):
-                return self._refuse(result, seq[1] + " (since it was checked)", kind="sequence")
+                return self._refuse(result, seq[1] + " (since it was checked)",
+                                    kind="no_session" if seq[0] == "no_session" else "sequence")
 
         # Re-check the budget and reserve the slot in one critical section. The check
         # in check() is advisory: between it and here other threads sharing this Gate

@@ -597,3 +597,74 @@ def test_a_tool_swapped_under_live_traffic_never_runs_on_the_old_verdict():
         th.join()
         sys.setswitchinterval(old)
     assert evil_runs == []   # evil's own policy forbids x=1
+
+
+def _swap_under_load(wall, swappers, calls):
+    import sys
+    import threading
+
+    stop = threading.Event()
+    threads = [threading.Thread(target=lambda f=f: [f() for _ in iter(stop.is_set, True)]) for f in swappers]
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    for t in threads:
+        t.start()
+    try:
+        return [calls() for _ in range(20000)]
+    finally:
+        stop.set()
+        for t in threads:
+            t.join()
+        sys.setswitchinterval(old)
+
+
+def test_two_overlapping_replaces_never_run_a_half_registered_tool():
+    from toolwall import ToolWall
+    from toolwall import rules as r
+
+    evil_runs = []
+
+    def good(x: int) -> str:
+        return "g"
+
+    def evil(x: int) -> str:
+        evil_runs.append(x)
+        return "e"
+
+    wall = ToolWall(approvals=False, audit=False)
+    wall.register("t", good)
+    reg = wall.gate.registry
+
+    def run():
+        wall.call("t", {"x": 1})
+        wall.gate.history.clear()
+
+    _swap_under_load(wall, [
+        lambda: reg.register("t", evil, replace=True, infer_schema=True,
+                             policy=Policy(constraints={"x": r.at_most(0)})),
+        lambda: reg.register("t", good, replace=True, infer_schema=True),
+    ], run)
+    assert evil_runs == []
+
+
+def test_decide_never_allows_from_a_half_registered_tool():
+    from toolwall import ToolWall
+    from toolwall import rules as r
+
+    wall = ToolWall(approvals=False, audit=False)
+    schema = ToolSchema(required=["x"], types={"x": int})
+    wall.rule("t", schema=schema, x=r.at_most(0))
+    policy = wall.gate.registry.get_policy("t")
+    fn = wall.gate.registry.get("t")
+    verdicts = _swap_under_load(
+        wall, [lambda: wall.gate.registry.register("t", fn, schema, policy=policy, replace=True)],
+        lambda: wall.decide("t", {"x": 1}).verdict)
+    assert "allow" not in verdicts   # every registered state forbids x=1
+
+
+def test_a_check_overlapping_a_change_is_blocked_with_a_plain_reason():
+    gate, ran = _registered_gate()
+    gate.registry._changing("pay")   # a change in progress (or one that failed half-way)
+    result = gate.check({"name": "pay", "args": {"amount": 1}})
+    assert result.blocked and result.kind == "registration"
+    assert result.model_reason == "This tool changed while the call was being checked. Try again."

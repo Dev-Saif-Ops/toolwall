@@ -24,9 +24,11 @@ Hardening, and the first rule about order.
   when glued to other text ("offAKIA..."), and AWS temporary `ASIA` keys are
   recognised. The OpenAI `sk-` and Stripe prefixes keep a left boundary, since
   they appear inside ordinary words.
-- Registration changes are now tracked as they start, and a verdict is bound
-  only if the registration was stable for the whole check, so a tool replaced
-  while traffic is flowing never runs on the old verdict.
+- Changes to a tool's registration are serialised and tracked as they start.
+  A check that overlaps a change is blocked ("re-check"), in `decide()` too, so
+  a tool replaced while traffic is flowing never runs on a verdict made for
+  another version of it. `wall.rule()` on a registered tool changes its policy
+  and schema as one step.
 
 ### Known limits
 - Sequence rules know tool names, not data, and remember sessions in one

@@ -208,9 +208,7 @@ class ToolWall:
                 )
             self.gate.register(name, _decide_only(name), schema, policy=policy)
         else:
-            registry.set_policy(name, policy)
-            if schema is not None:
-                registry.set_schema(name, schema)
+            registry.update(name, policy=policy, schema=schema)  # one change, not two
         return self
 
     def context(self, **values: Any) -> _context.context:
