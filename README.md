@@ -357,7 +357,23 @@ scrubbed too; see the guide). Install with
 `mcp`, `integrations` for all).
 Full guide: [docs/frameworks.md](docs/frameworks.md).
 
-### 6. Approvals that bind the exact call
+### 6. Rules about order: what may run after what
+
+```python
+wall.after("lookup_customer", block="send_email")        # no email after a customer lookup
+wall.after("read_file", ask=["http_post", "send_email"])  # sending out after a read waits for a person
+
+with wall.context(session_id=conversation.id, customer_id="c_42"):
+    ...
+```
+
+Each call is checked on its own, so "read a record, then send it out" passes
+every per-call rule. A sequence rule looks at what already ran in the same
+session: only calls that ran count (a blocked or held call arms nothing), and a
+call a rule applies to with no session in the context is blocked. It knows tool
+names, not data: it doesn't track what was read into a later call's arguments.
+
+### 7. Approvals that bind the exact call
 
 ```python
 from toolwall import Approvals, SQLiteStore

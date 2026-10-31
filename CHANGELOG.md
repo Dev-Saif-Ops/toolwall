@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.8.0] - unreleased
+
+Hardening, and the first rule about order.
+
+### Added
+- Sequence rules: `wall.after("lookup_customer", block="send_email")` and
+  `wall.after("read_file", ask=[...])`. Once a tool has run in a session, the
+  listed tools are refused, or wait for a person, in that session. Only calls
+  that ran count; a call a rule applies to with no session in the context is
+  blocked. The session key is `session_id` (`ToolWall(session_key=...)`). Checked
+  again right before a call runs, and in `decide()` for framework adapters.
+  (Issue #1.)
+- `Approvals(max_pending=1000)`: a cap on tickets waiting for a person.
+
+### Security notes
+- A verdict is now bound to the tool's registration. Replacing a tool, or
+  changing its schema or policy, between check and execute refuses the call
+  instead of running different code on a valid receipt. (Issue #4.)
+- Opening an approval ticket is atomic in both stores, so two workers holding the
+  same call share one ticket (SQLite: one write transaction).
+- Keys with a distinctive prefix (AWS, Google, GitHub, Stripe, Slack, JWT) are
+  found when glued to other text ("offAKIA..."), and AWS temporary `ASIA` keys
+  are recognised. The OpenAI `sk-` prefix keeps its left boundary, since it
+  appears inside ordinary words.
+
+### Known limits
+- Sequence rules know tool names, not data, and remember sessions in one
+  process (the most recent 100,000).
+
 ## [Unreleased]
 
 ### Added

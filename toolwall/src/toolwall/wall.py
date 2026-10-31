@@ -25,6 +25,7 @@ from typing import Any, Literal
 
 from toolwall import context as _context
 from toolwall.approvals import Approvals, TicketError
+from toolwall.sequence import DEFAULT_SESSION_KEY, Sequences
 from toolwall.gate import ApprovalHandler, DefaultMode, Gate, GateResult, Verdict
 from toolwall._aio import is_async_callable
 from toolwall.intake import ToolCall
@@ -133,6 +134,7 @@ class ToolWall:
         audit: bool = True,
         approval: ApprovalHandler | None = None,
         approvals: Approvals | Literal[False] | None = None,
+        session_key: str = DEFAULT_SESSION_KEY,
     ):
         shield = Shield(mode="redact" if redact else "block") if detect_secrets else None
         meter = Meter() if audit else None
@@ -141,6 +143,7 @@ class ToolWall:
             None if approvals is False else approvals if approvals is not None else Approvals()
         )
         self.gate.tickets = self.approvals
+        self._session_key = session_key
 
     # -- setup (chainable) ---------------------------------------------------
 
@@ -309,6 +312,7 @@ class ToolWall:
         call = ToolCall(name=decision.tool, args=dict(decision.args))
         reason = self.gate._reserve_budget(call)
         if reason is None:
+            self._ran(decision.tool)
             return Decision("allow", decision.tool, decision.args, None, decision.detail,
                             decision.receipt, decision.ticket)
         probe = GateResult(Verdict.BLOCK, call, [reason], kind="budget")
@@ -316,11 +320,29 @@ class ToolWall:
         return Decision("deny", decision.tool, decision.args, probe.model_reason, reason,
                         decision.receipt, decision.ticket)
 
+    def after(self, tool: str, *, block: str | list[str] | tuple[str, ...] | None = None,
+              ask: str | list[str] | tuple[str, ...] | None = None) -> "ToolWall":
+        """A sequence rule: once `tool` has run in a session, calls to the tools in
+        `block` are refused there, and calls to the tools in `ask` wait for a
+        person. The session comes from the context (`session_id` by default).
+
+            wall.after("lookup_customer", block="send_email")
+            wall.after("read_file", ask=["http_post", "send_email"])
+        """
+        if self.gate.sequences is None:
+            self.gate.sequences = Sequences(self._session_key)
+        self.gate.sequences.add(tool, block=block, ask=ask)
+        return self
+
     def decline(self, decision: Decision, *, by: str = "framework") -> None:
         """A person declined a held call through the framework: deny its ticket,
         so it can't be approved and run later from the queue."""
         if decision.ticket is not None and self.approvals is not None:
             self.approvals.close(decision.ticket, "denied", by=by)
+
+    def _ran(self, name: str) -> None:
+        if self.gate.sequences is not None:
+            self.gate.sequences.ran(name, _context.current())
 
     def _decide(self, name: str, args: dict[str, Any] | None, *, reserve: bool) -> Decision:
         result = self.gate.check({"name": name, "args": args or {}})
@@ -336,6 +358,8 @@ class ToolWall:
         verdict: Literal["allow", "deny", "ask"] = (
             "allow" if result.allowed else "ask" if result.needs_approval else "deny"
         )
+        if verdict == "allow" and reserve:
+            self._ran(name)  # the framework is about to run it
         return Decision(
             verdict=verdict,
             tool=name,

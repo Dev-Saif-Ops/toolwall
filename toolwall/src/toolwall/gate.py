@@ -189,6 +189,7 @@ class GateResult:
             "budget": "The limit for calls to this tool has been reached.",
             "approval_denied": "A person declined this call.",
             "decide_only": "This call can't be run here.",
+            "sequence": "This call isn't allowed after an earlier step in this conversation.",
         }
         if self.verdict is Verdict.ALLOW:  # ran, but its output was withheld or it failed
             return "The tool ran, but its output can't be shown."
@@ -245,6 +246,9 @@ class Gate:
         # ticket for exactly this call grants it; a held call nobody can approve
         # now gets a pending ticket.
         self.tickets: Any = None
+        # Sequence rules (toolwall.sequence), set by ToolWall.after(): what may run
+        # after what within one session.
+        self.sequences: Any = None
         self.dry_run = dry_run
         self.lane = lane
         self.history: list[GateResult] = []  # every checked result, for reports/suggest
@@ -448,6 +452,20 @@ class Gate:
                 )
             receipt = None
 
+        if self.sequences is not None:
+            from toolwall import context as _context
+
+            seq = self.sequences.check(call.name, _context.current())
+            if seq is not None and seq[0] == "block":
+                return self._record(
+                    GateResult(Verdict.BLOCK, call, [seq[1]], findings=findings, kind="sequence")
+                )
+            if seq is not None:
+                return self._record(
+                    GateResult(Verdict.NEEDS_APPROVAL, call, [seq[1]], findings=findings,
+                               receipt=receipt, kind="approval")
+                )
+
         wants_approval = policy.wants_approval(call.args) if policy is not None else False
         if isinstance(wants_approval, str):  # ask_if couldn't be evaluated: fail closed
             return self._record(GateResult(Verdict.BLOCK, call, [wants_approval], kind="policy"))
@@ -625,6 +643,15 @@ class Gate:
                 "so it is awaited and its output scanned",
             )
 
+        # A step this one may not follow can have run since the check (another
+        # thread, same session). Check again right before running.
+        if self.sequences is not None:
+            from toolwall import context as _context
+
+            seq = self.sequences.check(result.call.name, _context.current())
+            if seq is not None and (seq[0] == "block" or result.kind != "approval"):
+                return self._refuse(result, seq[1] + " (since it was checked)", kind="sequence")
+
         # Re-check the budget and reserve the slot in one critical section. The check
         # in check() is advisory: between it and here other threads sharing this Gate
         # may have executed, and without this a burst of parallel calls all pass a
@@ -648,6 +675,10 @@ class Gate:
         if tool is None:  # registry mutated between check and execute
             result.error = f"unknown tool at execute time: {result.call.name!r}"
             return self._record_tool(result, invoke)
+        if self.sequences is not None:
+            from toolwall import context as _context
+
+            self.sequences.ran(result.call.name, _context.current())
         if invoke is not None:
             return invoke, execute_args
         return (lambda args: tool(**args)), execute_args

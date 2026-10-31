@@ -48,8 +48,12 @@ the other layers next to it.
   check can see.
 - **MCP tool poisoning.** ToolWall doesn't read MCP tool descriptions, so a
   malicious description in a server's tool list isn't detected.
-- **Sequences of calls.** Each call is checked on its own, plus budgets.
-  "Read then exfiltrate" across calls isn't a rule type yet.
+- **Sequences of calls, beyond the rules you write.** `wall.after(...)` covers
+  "once A has run in this session, B is refused or waits for a person", but it
+  knows tool names, not data: it doesn't follow what was read into a later
+  call's arguments. Sessions are remembered in one process (the most recent
+  100,000 by default), not across processes. A framework branch that is
+  abandoned still counts as having run.
 - **Calls checked together.** When a framework runs a turn's tool calls
   concurrently (the OpenAI Agents SDK does by default), their checks can all
   happen before any of them runs, so two calls in one turn can each pass a rule

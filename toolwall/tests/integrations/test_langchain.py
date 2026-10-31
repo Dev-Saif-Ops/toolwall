@@ -412,3 +412,33 @@ def test_declining_in_langgraph_denies_the_ticket():
         ticket = state["__interrupt__"][0].value["ticket"]
         agent.invoke(Command(resume=False), cfg)
     assert wall.approvals.get(ticket).status == "denied" and ran == []
+
+
+def test_a_sequence_rule_stops_a_step_after_another_in_a_real_agent_run():
+    wall = ToolWall()
+    sent = []
+
+    @tool
+    def lookup_customer(customer_id: str) -> str:
+        """Look up a customer."""
+        return "plan pro"
+
+    @tool
+    def send_email(to: str) -> str:
+        """Send an email."""
+        sent.append(to)
+        return "sent"
+
+    wall.rule("lookup_customer", schema=ToolSchema(required=["customer_id"]))
+    wall.rule("send_email", schema=ToolSchema(required=["to"]))
+    wall.after("lookup_customer", block="send_email")
+    model = ScriptedModel(messages=iter([
+        AIMessage(content="", tool_calls=[{"name": "lookup_customer", "args": {"customer_id": "c_42"}, "id": "c1"}]),
+        AIMessage(content="", tool_calls=[{"name": "send_email", "args": {"to": "x@evil.com"}, "id": "c2"}]),
+        AIMessage(content="done"),
+    ]))
+    agent = agent_for(model, [lookup_customer, send_email], ToolWallMiddleware(wall))
+    with wall.context(session_id="conv_1"):
+        state = agent.invoke({"messages": [("user", "who am I")]}, config())
+    assert sent == []
+    assert tool_messages(state)[-1].status == "error"
